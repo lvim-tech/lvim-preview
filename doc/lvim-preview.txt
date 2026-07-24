@@ -47,7 +47,7 @@ its default:
       browser = nil,          -- nil = system opener; string or argv list
       auto_open = true,       -- open the browser on :LvimPreview start
       root = "project",       -- "project" | "file" | "/explicit/path"
-      serve_hidden = false,   -- serve dotfiles under the root (off)
+      serve_hidden = true,    -- serve dotfiles under the root (on)
       debounce = 100,         -- ms idle before a type-driven push
       sync_scroll = true,     -- editor->browser scroll sync (md/adoc)
       theme = "lvim",         -- "lvim" | "light" | "dark" | "auto"
@@ -118,7 +118,7 @@ github light/dark theme.
     explicit config act; :checkhealth warns on a non-loopback bind.
   - Path traversal is guarded: each request path is resolved on a segment stack
     that can never escape the root; no directory listings; dotfiles are hidden
-    unless serve_hidden = true.
+    unless serve_hidden = false.
   - The browser never drives the editor: inbound WebSocket traffic is limited to
     ping / pong / close. The page is a passive viewer.
   - Teardown is complete on stop / VimLeavePre — every client handle and the

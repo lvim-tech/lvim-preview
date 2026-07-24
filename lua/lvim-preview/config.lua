@@ -25,7 +25,9 @@
 ---@field browser    string|string[]|nil  nil = system opener; a command string or an argv list.
 ---@field auto_open  boolean         Open the browser on `:LvimPreview start`.
 ---@field root       string          "project" | "file" | an explicit absolute path.
----@field serve_hidden boolean       Serve dotfiles under the root (off — `.env`/`.git` must not leak).
+---@field serve_hidden boolean       Serve dotfiles under the root (ON — a project's docs often live in
+---                                   a dot-dir; the server is loopback-only, and `.env`/`.git` become
+---                                   readable by anything on this machine, so set false to lock it down).
 ---@field debounce   integer         ms of idle before a type-driven push (md/adoc/svg).
 ---@field sync_scroll boolean        Editor→browser scroll sync (md/adoc).
 ---@field theme      "lvim"|"light"|"dark"|"auto"  Preview theme; "lvim" tracks the live palette.
@@ -53,7 +55,7 @@ return {
     -- "file" — the previewed file's own directory (re-rooted when the previewed file changes).
     -- "/abs/path" — an explicit servable root.
     root = "project",
-    serve_hidden = false,
+    serve_hidden = true,
     debounce = 100,
     sync_scroll = true,
     theme = "lvim",

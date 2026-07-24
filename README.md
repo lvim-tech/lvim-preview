@@ -33,7 +33,7 @@ so the browser tracks your theme.
   **and every file under the root** to the LAN with **no authentication** — an explicit config
   act; `:checkhealth lvim-preview` warns when the bound address is non-loopback.
 - **Path-traversal guarded** — every request is resolved on a segment stack that can never
-  escape the root; no directory listings; dotfiles are hidden unless `serve_hidden = true`.
+  escape the root; no directory listings; dotfiles are served (set `serve_hidden = false` to hide them).
 - **The browser never drives the editor** — inbound WebSocket traffic is limited to ping / pong
   / close; the page is a passive viewer.
 
@@ -79,7 +79,7 @@ require("lvim-preview").setup({
     browser = nil, -- nil = system opener; a command string or an argv list ({ "firefox", "--new-window" })
     auto_open = true, -- open the browser on :LvimPreview start
     root = "project", -- "project" (root marker / cwd) | "file" (the file's dir) | "/explicit/path"
-    serve_hidden = false, -- serve dotfiles under the root (off — .env / .git must not leak)
+    serve_hidden = true, -- serve dotfiles under the root (on — set false to keep .env / .git unreadable)
     debounce = 100, -- ms of idle before a type-driven push (md / adoc / svg)
     sync_scroll = true, -- editor→browser scroll sync (md / adoc)
     theme = "lvim", -- "lvim" (live palette) | "light" | "dark" | "auto"
