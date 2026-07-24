@@ -1,0 +1,33 @@
+lvim-preview — vendored browser render assets
+=============================================
+
+These are third-party BROWSER runtime assets (JS/CSS/fonts), pinned to exact
+versions and served locally by the in-plugin HTTP server so the preview page
+makes NO external/CDN request ever (fully offline). They are runtime assets,
+not Lua dependencies. Each keeps its upstream LICENSE beside it; health.lua
+(:checkhealth lvim-preview) verifies every asset below is present.
+
+Do not hand-edit the minified files. To refresh, re-fetch the exact version
+from the source below and update this manifest.
+
+asset             | version  | license      | source
+------------------|----------|--------------|---------------------------------------------------------
+markdown-it       | 14.1.0   | MIT          | npm markdown-it            → dist/markdown-it.min.js
+markdown-it-emoji | 3.0.0    | MIT          | npm markdown-it-emoji      → dist/markdown-it-emoji.min.js
+katex             | 0.16.11  | MIT          | npm katex                  → dist/katex.min.{js,css}, dist/contrib/auto-render.min.js, dist/fonts/*.woff2
+mermaid           | 11.4.1   | MIT          | npm mermaid                → dist/mermaid.min.js
+highlight.js      | 11.11.1  | BSD-3-Clause | cdnjs highlight.js 11.11.1 → highlight.min.js; npm highlight.js → styles/github{,-dark}.min.css
+github-markdown-css | 5.8.1  | MIT          | npm github-markdown-css    → github-markdown.css
+asciidoctor.js    | 3.0.4    | MIT          | npm @asciidoctor/core      → dist/browser/asciidoctor.js
+
+Notes
+-----
+* katex: only the .woff2 fonts are vendored (the modern format KaTeX lists
+  first); ancient-browser .woff/.ttf fallbacks are omitted. katex.min.css
+  references the fonts by the relative path fonts/… , which resolves under the
+  served /@lvim-preview/vendor/katex/ prefix.
+* highlight.js: the browser bundle is the common-languages cdnjs build; the two
+  github themes are toggled by prefers-color-scheme when the preview theme is a
+  static one, and are overridden by the palette when theme = "lvim".
+* line numbering for sync-scroll (data-source-line anchors) is done in
+  ../client.js through markdown-it's public token API — no separate plugin.

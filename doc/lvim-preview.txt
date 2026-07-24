@@ -1,0 +1,156 @@
+*lvim-preview.txt*    Live browser preview (Markdown / HTML / AsciiDoc / SVG)
+
+==============================================================================
+CONTENTS                                                      *lvim-preview*
+
+  1. Introduction ........................... |lvim-preview-intro|
+  2. Setup .................................. |lvim-preview-setup|
+  3. Commands ............................... |lvim-preview-commands|
+  4. Root modes ............................. |lvim-preview-root|
+  5. Theme .................................. |lvim-preview-theme|
+  6. Safety ................................. |lvim-preview-safety|
+  7. Vendored assets ........................ |lvim-preview-vendor|
+  8. API .................................... |lvim-preview-api|
+  9. Health ................................. |lvim-preview-health|
+
+==============================================================================
+1. INTRODUCTION                                         *lvim-preview-intro*
+
+lvim-preview serves a live browser preview of the file you are editing from an
+in-plugin, pure-Lua (libuv) HTTP + WebSocket server. There is no Node and no
+Python — the server, the RFC 6455 WebSocket framing and the file watching are
+all `vim.uv`; the handshake SHA-1 (Neovim ships only sha256) is a small pure-Lua
+routine over LuaJIT's `bit`.
+
+Update model, per file kind:
+  - `markdown`, `asciidoc`, `svg` — hot-update AS YOU TYPE. Changes to the
+    previewed buffer are pushed over the WebSocket (debounced), and the browser
+    re-renders client-side. No save, no temp files.
+  - `html` — served as authored (its own CSS / JS / images resolve against the
+    same root); a save pushes a reload. Save-driven by design — a half-typed tag
+    would thrash the DOM.
+
+All render assets (a Markdown renderer, asciidoctor.js, KaTeX, Mermaid, a code
+highlighter) are vendored locally: the page makes NO external / CDN request and
+works fully offline. See |lvim-preview-vendor|.
+
+==============================================================================
+2. SETUP                                                *lvim-preview-setup*
+
+setup() merges your options into the live config in place. Every value shown at
+its default:
+>lua
+  require("lvim-preview").setup({
+      address = "127.0.0.1",  -- bind address (non-loopback = LAN, no auth)
+      port = 5500,            -- preferred TCP port
+      auto_port = true,       -- scan upward when the port is busy
+      browser = nil,          -- nil = system opener; string or argv list
+      auto_open = true,       -- open the browser on :LvimPreview start
+      root = "project",       -- "project" | "file" | "/explicit/path"
+      serve_hidden = false,   -- serve dotfiles under the root (off)
+      debounce = 100,         -- ms idle before a type-driven push
+      sync_scroll = true,     -- editor->browser scroll sync (md/adoc)
+      theme = "lvim",         -- "lvim" | "light" | "dark" | "auto"
+      filetypes = { "markdown", "html", "asciidoc", "svg" },
+      features = {
+          katex = true,       -- $...$ / $$...$$ math (KaTeX)
+          mermaid = true,     -- ```mermaid fences -> diagrams
+          highlight = true,   -- fenced code highlighting (highlight.js)
+          emoji = true,       -- :shortcode: emoji
+      },
+      hud_chip = true,        -- lvim-hud serving chip while running
+      notify = true,          -- start/stop/port/client notifications
+      icons = {               -- Nerd Font single-width glyphs
+          server = "",
+          file = "󰈙",
+          pick = "",
+      },
+  })
+<
+`browser` may be a command string (split on whitespace) or an argv list, e.g.
+`{ "firefox", "--new-window" }` — always spawned as a list via `vim.system`,
+never a shell string.
+
+==============================================================================
+3. COMMANDS                                          *lvim-preview-commands*
+
+                                                        *:LvimPreview*
+:LvimPreview start [file]   Start the server and preview `file` (or the current
+                            buffer when omitted); opens the browser when
+                            `auto_open` is on.
+:LvimPreview stop           Stop the server; close all clients; clear the chip.
+:LvimPreview open           Re-open the browser at the current preview URL.
+:LvimPreview status         Report address / port / root / previewed file /
+                            client count / theme.
+:LvimPreview pick           Choose a previewable file under the root through the
+                            lvim-ui select picker (lvim-icons per row).
+
+==============================================================================
+4. ROOT MODES                                            *lvim-preview-root*
+
+`root` decides what the server may serve:
+  - "project"  the nearest ancestor of the file with a root marker (.git,
+               .lvim, package.json, Cargo.toml, go.mod, Makefile,
+               pyproject.toml), else the cwd. The whole tree is servable, so
+               relative links, images and page assets resolve.
+  - "file"     the previewed file's own directory (re-rooted when you preview
+               another file).
+  - a path     a fixed absolute servable root.
+
+The previewed file must live under the resolved root; otherwise `start` reports
+it (switch to "file" or an enclosing path).
+
+==============================================================================
+5. THEME                                                *lvim-preview-theme*
+
+theme = "lvim" (default) generates the preview CSS variables from the live
+lvim-utils palette and re-pushes them to every open tab on `ColorScheme` and on
+a palette sync, so the page follows the editor with no reload. "light" / "dark"
+use a fixed GitHub-ish palette; "auto" ships both and lets the browser's
+prefers-color-scheme decide. Code-block token colours use the highlight.js
+github light/dark theme.
+
+==============================================================================
+6. SAFETY                                               *lvim-preview-safety*
+
+  - Loopback only by default (127.0.0.1). Binding any other address exposes the
+    preview AND every file under the root to the LAN with NO authentication — an
+    explicit config act; :checkhealth warns on a non-loopback bind.
+  - Path traversal is guarded: each request path is resolved on a segment stack
+    that can never escape the root; no directory listings; dotfiles are hidden
+    unless serve_hidden = true.
+  - The browser never drives the editor: inbound WebSocket traffic is limited to
+    ping / pong / close. The page is a passive viewer.
+  - Teardown is complete on stop / VimLeavePre — every client handle and the
+    listener are closed, so no port is orphaned.
+
+==============================================================================
+7. VENDORED ASSETS                                      *lvim-preview-vendor*
+
+Every browser render asset is pinned and served locally from `static/vendor/`
+(markdown-it, markdown-it-emoji, KaTeX with its fonts, Mermaid, highlight.js,
+github-markdown-css, asciidoctor.js), each with its upstream LICENSE beside it.
+`static/vendor/README` lists the version / license / source of each. The served
+page never points at a CDN. :checkhealth verifies every asset is present.
+
+==============================================================================
+8. API                                                     *lvim-preview-api*
+
+require("lvim-preview").setup(opts)     Configure / start (idempotent).
+require("lvim-preview").start(file?)    Preview `file` or the current buffer.
+require("lvim-preview").preview_file(p) Preview an explicit path.
+require("lvim-preview").stop()          Stop the server.
+require("lvim-preview").open()          Re-open the browser tab.
+require("lvim-preview").pick()          Open the file chooser.
+require("lvim-preview").status()        Notify the current status.
+require("lvim-preview").is_running()    -> boolean
+
+==============================================================================
+9. HEALTH                                               *lvim-preview-health*
+
+:checkhealth lvim-preview checks the Neovim / LuaJIT `bit` runtime, the optional
+ecosystem integrations (lvim-utils / lvim-ui / lvim-hud / lvim-icons), the
+browser opener, config validity, the SECURITY posture of the bind address, and
+the integrity of every vendored render asset (the offline guarantee).
+
+vim:tw=78:ts=8:ft=help:norl:

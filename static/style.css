@@ -1,0 +1,108 @@
+/*
+ * lvim-preview base layout. Loaded AFTER github-markdown.css so the --lp-* theme variables
+ * (supplied by the inline <style id="lp-theme"> block, generated from the editor palette or a
+ * fixed light/dark set) win. Keeps github-markdown's structural rules but repaints every
+ * colour surface from the theme, so the preview matches the editor.
+ */
+
+:root {
+  color-scheme: light dark;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background: var(--lp-bg, #0d1117);
+}
+
+body {
+  display: flex;
+  justify-content: center;
+}
+
+.lp-body {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 2.5rem 3rem 6rem;
+  background: var(--lp-bg, #0d1117) !important;
+  color: var(--lp-fg, #e6edf3) !important;
+}
+
+/* markdown-body overrides — repaint from the theme variables. */
+.markdown-body {
+  color: var(--lp-fg) !important;
+  background: var(--lp-bg) !important;
+}
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  color: var(--lp-heading) !important;
+}
+.markdown-body h1,
+.markdown-body h2 {
+  border-bottom-color: var(--lp-border) !important;
+}
+.markdown-body a {
+  color: var(--lp-link) !important;
+}
+.markdown-body hr {
+  background-color: var(--lp-border) !important;
+}
+.markdown-body blockquote {
+  color: var(--lp-quote-fg) !important;
+  border-left-color: var(--lp-quote-border) !important;
+}
+.markdown-body table tr {
+  background-color: var(--lp-bg) !important;
+  border-top-color: var(--lp-table-border) !important;
+}
+.markdown-body table tr:nth-child(2n) {
+  background-color: var(--lp-table-alt) !important;
+}
+.markdown-body table th,
+.markdown-body table td {
+  border-color: var(--lp-table-border) !important;
+}
+.markdown-body code,
+.markdown-body tt {
+  background-color: var(--lp-code-bg) !important;
+  color: var(--lp-code-fg) !important;
+}
+.markdown-body pre {
+  background-color: var(--lp-code-bg) !important;
+}
+.markdown-body pre code {
+  background: transparent !important;
+}
+.markdown-body ::selection {
+  background: var(--lp-selection) !important;
+}
+
+/* Mermaid blocks: markdown-it renders ```mermaid as <pre><code class=language-mermaid>. Give
+ * the diagram room and a neutral surface; mermaid replaces the code with an <svg>. */
+.markdown-body pre code.language-mermaid {
+  display: block;
+  background: transparent !important;
+}
+.markdown-body .mermaid svg {
+  max-width: 100%;
+}
+
+/* SVG previews: a light neutral checker so transparent artwork is visible. */
+body:has(> #lp-content) {
+  background: var(--lp-bg);
+}
+
+/* AsciiDoc default stylesheet leaves a white document background; force the theme surface. */
+.markdown-body #content,
+.markdown-body #header,
+.markdown-body #footer {
+  background: transparent !important;
+  color: var(--lp-fg) !important;
+}
