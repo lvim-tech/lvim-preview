@@ -157,22 +157,31 @@ end
 ---@param client uv.uv_tcp_t
 ---@param urlpath string
 local function serve_doc(client, urlpath)
-    -- "/" maps to the previewed file so the tab opened at the root shows the document.
+    -- "/" maps to a previewed file so a tab opened at the root shows a document. With several
+    -- previewed at once the first by url_path wins — every other tab is opened at its own URL.
     if urlpath == "" or urlpath == "/" then
-        urlpath = state.url_path or "/"
+        local first = state.list()[1]
+        urlpath = first and first.url_path or "/"
     end
+    -- Resolve the document by the REQUESTED url_path, not by "the" previewed file: any number of
+    -- documents are live at once, and each tab asks for its own. Matching on the stored url_path
+    -- also keeps this fast-path safe (no vim.fs call inside the libuv callback).
+    local doc = state.doc_for_url(urlpath)
+
+    -- `serve_hidden` is the SINGLE switch for dotfiles: it governs what the server will serve AND
+    -- what the picker offers, so the two can never disagree (a file you can pick is a file you can
+    -- open). `..` escapes stay blocked either way.
     local path = safe_join(state.root, urlpath, config.serve_hidden)
     if not path then
         return not_found(client)
     end
 
     local kind = util.kind_for(path)
-    local is_previewed = state.file ~= nil and vim.fs.normalize(path) == vim.fs.normalize(state.file)
 
-    -- The previewed markdown/asciidoc/svg buffer: wrap the CACHED (possibly unsaved) content in
-    -- the shell so first paint already reflects the editor; WS `update` then keeps it live.
-    if is_previewed and kind and kind ~= "html" and state.content ~= nil then
-        return respond(client, "200 OK", "text/html; charset=utf-8", template.shell(kind, state.content, urlpath))
+    -- A previewed markdown/asciidoc/svg buffer: wrap its CACHED (possibly unsaved) content in the
+    -- shell so first paint already reflects the editor; WS `update` frames then keep it live.
+    if doc and kind and kind ~= "html" and doc.content ~= nil then
+        return respond(client, "200 OK", "text/html; charset=utf-8", template.shell(kind, doc.content, urlpath))
     end
 
     read_file(path, function(data)

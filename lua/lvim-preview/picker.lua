@@ -68,7 +68,12 @@ local function scan(root)
                 if ext and exts[ext:lower()] then
                     -- name is root-relative already (vim.fs.dir with depth returns nested paths)
                     local top = name:match("^([^/]+)/")
-                    if not (top and SKIP_DIR[top]) and not name:match("/%.") then
+                    -- Dotfiles follow `serve_hidden` — the ONE switch for both sides, so what the
+                    -- picker offers is always what the server will serve. A hidden segment counts
+                    -- ANYWHERE in the path: the old test (`/%.`) only saw a dot AFTER a slash, so a
+                    -- top-level hidden dir (`.claude/AUDIT.md`) slipped into the list and then 404'd.
+                    local hidden = name:match("^%.") ~= nil or name:match("/%.") ~= nil
+                    if not (top and SKIP_DIR[top]) and (config.serve_hidden or not hidden) then
                         out[#out + 1] = { label = name, path = vim.fs.normalize(root .. "/" .. name) }
                     end
                 end
@@ -100,8 +105,9 @@ function M.pick(root, on_choose)
     local current_item = nil
     for i, f in ipairs(files) do
         items[i] = { label = f.label, icon = icon_for(f.path), path = f.path }
-        if state.file and vim.fs.normalize(state.file) == f.path then
-            current_item = items[i]
+        -- Focus a file that is ALREADY previewed (any of them — several can be live at once).
+        if state.doc(vim.fs.normalize(f.path)) then
+            current_item = current_item or items[i]
         end
     end
 

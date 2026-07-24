@@ -102,10 +102,11 @@ local function display_host()
     return state.host
 end
 
---- The full preview URL for the current previewed file.
+--- The full preview URL of one document (the root when none is given).
+---@param doc LvimPreviewDoc?
 ---@return string
-local function preview_url()
-    return ("http://%s:%d%s"):format(display_host(), state.port, state.url_path)
+local function preview_url(doc)
+    return ("http://%s:%d%s"):format(display_host(), state.port, doc and doc.url_path or "/")
 end
 
 --- Ensure a loaded buffer exists for `file` (so the live-update autocmds can attach), returning
@@ -140,7 +141,10 @@ function M.preview_file(file)
         return false
     end
 
-    local root = resolve_root(abs)
+    -- The servable root is SERVER-level: once listening it is fixed, so a second document must
+    -- live under it (otherwise it could not be addressed by a URL at all). Only the first preview
+    -- resolves a root; a later file outside it gets a clear error instead of a broken page.
+    local root = (server.is_running() and state.root ~= "") and state.root or resolve_root(abs)
     local up = url_path_of(abs, root)
     if not up then
         notify(
@@ -150,15 +154,20 @@ function M.preview_file(file)
         return false
     end
 
-    state.file = abs
-    state.filetype = kind
     state.root = root
-    state.url_path = up
-    state.bufnr = ensure_buffer(abs)
+    -- Register (or refresh) the document — previewing another file JOINS the live set instead of
+    -- replacing it, so every already-open tab keeps updating from its own buffer.
+    ---@type LvimPreviewDoc
+    local doc = state.docs[abs] or {}
+    doc.file = abs
+    doc.filetype = kind
+    doc.url_path = up
+    doc.bufnr = ensure_buffer(abs)
+    state.docs[abs] = doc
 
     theme.refresh() -- make sure the cached theme CSS matches the current palette
-    watch.attach(state.bufnr, kind)
-    scroll.attach(state.bufnr, kind)
+    watch.attach(doc)
+    scroll.attach(doc)
 
     if not server.is_running() then
         local ok, err = server.start(config.address, config.port)
@@ -169,13 +178,12 @@ function M.preview_file(file)
         chip(true)
         local warn = not util.is_loopback(state.host) and "  (LAN-exposed, no auth)" or ""
         notify(("serving %s:%d%s"):format(display_host(), state.port, warn))
-    else
-        -- Already serving another file: tell open tabs to reload onto the new document.
-        server.broadcast({ type = "reload" })
     end
+    -- NOTE: no global `reload` broadcast here. The server already serves every registered
+    -- document, so a new preview must not yank the tabs showing the others onto it.
 
     if config.auto_open then
-        browser.open(preview_url(), config.browser)
+        browser.open(preview_url(doc), config.browser)
     end
     return true
 end
@@ -195,32 +203,49 @@ function M.start(file)
     M.preview_file(target)
 end
 
---- Stop the server and clear the previewed-file state + hud chip.
+--- Stop previewing. With `file`, close only THAT document and keep the server (and every other
+--- previewed document) alive; the last one closed shuts the server down. Without it, stop
+--- everything: detach all documents, drop the server and the hud chip.
+---@param file string?  path of a single document to stop previewing
 ---@return nil
-function M.stop()
+function M.stop(file)
     if not server.is_running() then
         notify("not running")
         return
     end
-    watch.detach()
-    scroll.detach()
+    if file and file ~= "" then
+        local abs = vim.fs.normalize(vim.fn.fnamemodify(file, ":p"))
+        local doc = state.doc(abs)
+        if not doc then
+            notify(("not previewed: %s"):format(vim.fn.fnamemodify(abs, ":t")), vim.log.levels.WARN)
+            return
+        end
+        watch.detach(doc)
+        scroll.detach(doc)
+        state.docs[abs] = nil
+        if state.count() > 0 then
+            notify(("stopped %s (%d still previewing)"):format(vim.fn.fnamemodify(abs, ":t"), state.count()))
+            return
+        end
+        -- that was the last document — fall through and shut the server down
+    end
+    watch.detach_all()
+    scroll.detach_all()
     server.stop()
     chip(false)
-    state.file = nil
-    state.bufnr = nil
-    state.filetype = nil
-    state.content = nil
+    state.docs = {}
     notify("stopped")
 end
 
---- Re-open the browser at the current preview URL.
+--- Re-open the browser: the current buffer's document when it is previewed, else the first one.
 ---@return nil
 function M.open()
-    if not server.is_running() or not state.file then
+    if not server.is_running() or state.count() == 0 then
         notify("not running — start a preview first", vim.log.levels.WARN)
         return
     end
-    browser.open(preview_url(), config.browser)
+    local doc = state.doc_for_buf(vim.api.nvim_get_current_buf()) or state.list()[1]
+    browser.open(preview_url(doc), config.browser)
 end
 
 --- The root to scan for the chooser: the live server's root while running, else the root of the
@@ -263,13 +288,19 @@ function M.status()
             util.is_loopback(state.host) and " (loopback)" or " (LAN-exposed, NO AUTH)"
         ),
         ("root    : %s"):format(state.root),
-        ("file    : %s"):format(
-            state.file and (vim.fn.fnamemodify(state.file, ":.") .. "  →  " .. state.url_path) or "-"
-        ),
-        ("kind    : %s"):format(state.filetype or "-"),
         ("clients : %d"):format(server.client_count()),
         ("theme   : %s"):format(config.theme),
     }
+    -- Every previewed document, not just one: the set is what the server is serving.
+    local docs = state.list()
+    lines[#lines + 1] = ("files   : %d"):format(#docs)
+    for _, doc in ipairs(docs) do
+        lines[#lines + 1] = ("  %s  →  %s  (%s)"):format(
+            vim.fn.fnamemodify(doc.file, ":."),
+            doc.url_path,
+            doc.filetype
+        )
+    end
     vim.notify("lvim-preview\n" .. table.concat(lines, "\n"), vim.log.levels.INFO)
 end
 
@@ -291,7 +322,7 @@ local function register_command()
         if sub == "start" then
             M.start(cmd.fargs[2])
         elseif sub == "stop" then
-            M.stop()
+            M.stop(cmd.fargs[2]) -- optional path: stop ONE document, keep the rest previewing
         elseif sub == "open" then
             M.open()
         elseif sub == "pick" then

@@ -196,12 +196,19 @@ local function check_server(h)
     if state.running then
         local scope = util.is_loopback(state.host) and "loopback" or "LAN-EXPOSED"
         h.info(
-            ("server running on http://%s:%d (%s), %d client(s), previewing: %s"):format(
+            ("server running on http://%s:%d (%s), %d client(s), previewing %d file(s): %s"):format(
                 state.host,
                 state.port,
                 scope,
                 #state.clients,
-                state.file or "-"
+                state.count(),
+                (function()
+                    local names = {}
+                    for _, doc in ipairs(state.list()) do
+                        names[#names + 1] = vim.fn.fnamemodify(doc.file, ":t")
+                    end
+                    return #names > 0 and table.concat(names, ", ") or "-"
+                end)()
             )
         )
     else

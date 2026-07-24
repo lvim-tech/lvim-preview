@@ -1,9 +1,12 @@
 -- lvim-preview.scroll: editor->browser sync scroll (markdown + asciidoc). A WinScrolled /
--- CursorMoved on the previewed buffer broadcasts a `scroll` frame carrying the top visible
--- line and the buffer's line count; the client jumps to the nearest block with a matching
--- `data-source-line` (markdown), or falls back to a proportional scroll (asciidoc, whose
--- vendored converter does not emit per-line anchors). One-way by design — the browser never
--- moves the editor (safety rule); two-way is a findings.md OPEN idea.
+-- CursorMoved on a previewed buffer broadcasts a `scroll` frame carrying the top visible line and
+-- the buffer's line count; the client jumps to the nearest block with a matching `data-source-line`
+-- (markdown), or falls back to a proportional scroll (asciidoc, whose vendored converter does not
+-- emit per-line anchors). One-way by design — the browser never moves the editor (safety rule);
+-- two-way is a findings.md OPEN idea.
+--
+-- PER DOCUMENT: every previewed file owns its augroup and its last-line marker, so several
+-- documents scroll-sync at once and each frame is addressed by that document's `url_path`.
 --
 ---@module "lvim-preview.scroll"
 
@@ -14,54 +17,76 @@ local server = require("lvim-preview.server")
 
 local M = {}
 
-local AUGROUP = "LvimPreviewScroll"
+---@type table<string, string>  doc path → its augroup name
+local groups = {}
+---@type table<string, integer>  doc path → last line broadcast, to suppress duplicate frames
+local last_line = {}
+---@type integer  augroup-name counter (a path is not a legal group name)
+local seq = 0
 
----@type integer  last line broadcast, to suppress duplicate frames
-local last_line = -1
-
---- Broadcast the current window's top line for the previewed buffer.
-local function send_scroll()
-    local buf = state.bufnr
+--- Broadcast the current window's top line for `doc`, when its buffer is the focused one.
+---@param doc LvimPreviewDoc
+local function send_scroll(doc)
+    local buf = doc.bufnr
     if not buf or api.nvim_get_current_buf() ~= buf then
         return
     end
     -- The top visible line drives the browser scroll (what the reader is looking at).
     local top = vim.fn.line("w0")
-    if top == last_line then
+    if top == last_line[doc.file] then
         return
     end
-    last_line = top
+    last_line[doc.file] = top
     server.broadcast({
         type = "scroll",
-        path = state.url_path,
+        path = doc.url_path,
         line = top,
         total = api.nvim_buf_line_count(buf),
     })
 end
 
---- Install the sync-scroll autocmds for the previewed buffer. No-op when sync_scroll is off or
---- the kind is html/svg (no source-line mapping to scroll to).
----@param bufnr integer
----@param filetype string
+--- Install the sync-scroll autocmds for one document. No-op when sync_scroll is off or the kind is
+--- html/svg (no source-line mapping to scroll to). Idempotent per document.
+---@param doc LvimPreviewDoc
 ---@return nil
-function M.attach(bufnr, filetype)
-    M.detach()
-    if not config.sync_scroll or (filetype ~= "markdown" and filetype ~= "asciidoc") then
+function M.attach(doc)
+    M.detach(doc)
+    if not config.sync_scroll or (doc.filetype ~= "markdown" and doc.filetype ~= "asciidoc") then
         return
     end
-    local grp = api.nvim_create_augroup(AUGROUP, { clear = true })
+    seq = seq + 1
+    local name = "LvimPreviewScroll_" .. seq
+    groups[doc.file] = name
+    local grp = api.nvim_create_augroup(name, { clear = true })
     api.nvim_create_autocmd({ "WinScrolled", "CursorMoved", "CursorMovedI" }, {
         group = grp,
-        buffer = bufnr,
-        callback = send_scroll,
+        buffer = doc.bufnr,
+        callback = function()
+            send_scroll(doc)
+        end,
     })
 end
 
---- Remove the sync-scroll autocmds.
+--- Remove ONE document's sync-scroll autocmds.
+---@param doc LvimPreviewDoc
 ---@return nil
-function M.detach()
-    pcall(api.nvim_del_augroup_by_name, AUGROUP)
-    last_line = -1
+function M.detach(doc)
+    local name = groups[doc.file]
+    if name then
+        pcall(api.nvim_del_augroup_by_name, name)
+        groups[doc.file] = nil
+    end
+    last_line[doc.file] = nil
+end
+
+--- Detach every document (server stop / VimLeavePre).
+---@return nil
+function M.detach_all()
+    for path, name in pairs(groups) do
+        pcall(api.nvim_del_augroup_by_name, name)
+        groups[path] = nil
+        last_line[path] = nil
+    end
 end
 
 return M
