@@ -100,6 +100,10 @@ local function respond(client, status, content_type, body)
         .. "Content-Length: "
         .. #body
         .. "\r\n"
+        -- A discoverable signature: when a SECOND Neovim finds this port busy, it probes for
+        -- exactly this header to tell "another lvim-preview instance" from "some other program"
+        -- and warn the user instead of silently starting on another port (server/init.bind_scan).
+        .. "Server: lvim-preview\r\n"
         .. "Cache-Control: no-store\r\n"
         .. "Connection: close\r\n\r\n"
     client:write(head .. body, function()

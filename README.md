@@ -3,7 +3,8 @@
 A live browser preview for **Markdown** and **org**, served
 straight from Neovim by an in-plugin pure-Lua (libuv) HTTP + WebSocket server. The page hot-reloads
 as you type — both update **without saving** —
-with KaTeX math, Mermaid diagrams, syntax-highlighted code, and editor→browser sync scrolling.
+with KaTeX math, Mermaid diagrams, syntax-highlighted code, and sync scrolling that can run
+**both ways**.
 
 It is also the **display half** for plugins that BUILD something: a producer registers the file it
 compiles (a PDF, a generated page) and lvim-preview serves it, live-reloads it on the producer's
@@ -21,13 +22,12 @@ so the browser tracks your theme.
 
 - `:LvimPreview start [file]` — start the server and open the browser at the file's URL. Without
   an argument it previews the current buffer.
-- **Hot reload as you type** for `markdown` and `org` (debounced, no save, no
-  temp files); **reload on save** for `html` (its own CSS / JS / images are served from the same
-  root).
+- **Hot reload as you type** for `markdown` and `org` (debounced, no save, no temp files). The
+  frame carries finished HTML, so the page replaces its content in place and never reloads.
 - **KaTeX** math (with your own macros and optional `mhchem` chemistry), **Mermaid** diagrams,
   **highlight.js** code blocks — all client-side, all vendored.
-- **Sync scrolling** (editor→browser), exact for both: every block carries the source line it
-  came from.
+- **Sync scrolling both ways** — editor→browser always, browser→editor when you opt in. Every
+  block carries the source line it came from, so neither direction guesses.
 - **Markdown and org are rendered in Lua, inside Neovim** — no JavaScript parser on the page. The
   Markdown renderer matches 644 of the 652 CommonMark 0.31.2 conformance examples byte-for-byte
   (7 of the other 8 render identically in a browser), plus GFM tables and strikethrough.
@@ -46,10 +46,18 @@ so the browser tracks your theme.
   act; `:checkhealth lvim-preview` warns when the bound address is non-loopback.
 - **Path-traversal guarded** — every request is resolved on a segment stack that can never
   escape the root; no directory listings; dotfiles are served (set `serve_hidden = false` to hide them).
-- **The browser never drives the editor** — inbound WebSocket traffic is limited to ping / pong
-  / close; the page is a passive viewer. The single, doubly-gated exception is inverse search on
-  a build artifact: it needs `artifact.allow_client_messages = true` **and** an `on_message`
-  handler in that artifact's own registration. Every ordinary preview stays passive.
+- **The browser never drives the editor unless you say so** — inbound WebSocket traffic is
+  limited to ping / pong / close, and the page is a passive viewer. There are exactly two opt-in
+  relaxations, each with its own flag, off by default, and each accepting only its own message:
+  - **inverse search** on a build artifact — needs `artifact.allow_client_messages = true` **and**
+    an `on_message` handler in that artifact's own registration;
+  - **browser→editor sync scroll** — needs `sync_scroll_back.enabled = true`; only the
+    `scroll_source` message is accepted, only for a previewed Markdown/org document, and only
+    into a window that is already visible. Nothing is opened, no buffer is switched and the
+    current window never changes.
+
+  Anything else from a page — a different message type, a message for a document that is not
+  previewed, any binary frame — is discarded exactly as it was before either flag existed.
 
 ## Requirements
 
@@ -95,7 +103,15 @@ require("lvim-preview").setup({
     root = "project", -- "project" (root marker / cwd) | "file" (the file's dir) | "/explicit/path"
     serve_hidden = true, -- serve dotfiles under the root (on — set false to keep .env / .git unreadable)
     debounce = 100, -- ms of idle before a type-driven push (md / org)
-    sync_scroll = true, -- editor→browser scroll sync (md / adoc / org)
+    sync_scroll = true, -- editor→browser scroll sync (md / org)
+    -- Browser→editor scroll sync (the way back). On by default: a page scroll moves the editor window.
+    sync_scroll_back = {
+        enabled = true, -- master gate
+        move = "view", -- "view" (scroll the window, keep the cursor) | "cursor"
+        place = "top", -- "top" (same reference point both ways) | "center" (zz-like)
+        throttle = 80, -- ms between two scroll reports from the page
+        settle = 300, -- ms the side that moved last owns the sync
+    },
     theme = "lvim", -- "lvim" (live palette) | "light" | "dark" | "auto"
     -- The render KINDS enabled. Removing one makes every file mapping to it non-previewable
     -- everywhere at once: the picker stops offering it, `start` refuses it, the server stops
@@ -150,6 +166,51 @@ require("lvim-preview").setup({
 
 The previewed file must live under the resolved root; otherwise `start` reports it (use
 `root = "file"` or an enclosing path).
+
+## Sync scrolling
+
+Every block the Markdown and org renderers emit carries the source line it came from
+(`data-source-line`), so both directions address a line, not a percentage.
+
+**Editor → browser** (`sync_scroll`, on by default). Scrolling or moving in a previewed buffer
+sends its top window line; the page jumps to the block that line belongs to.
+
+**Browser → editor** (`sync_scroll_back.enabled`, **off** by default). Scrolling the page reports
+the source line at the top of the viewport and the editor follows:
+
+- **The view moves, not the cursor** (`move = "view"`). Scrolling is reading, not editing, so your
+  cursor stays where you left it. It is only dragged along when the new view no longer contains it
+  — exactly what `CTRL-E` / `CTRL-Y` do, because a window's cursor cannot be off screen. Set
+  `move = "cursor"` to put the cursor on the reported line instead.
+- **Nothing is stolen.** Only a window that is already showing that document, in the current
+  tabpage, is scrolled. No `:edit`, no buffer switch, no change of the current window. If the
+  document is not visible — you are working on something else — the message is discarded and
+  nothing at all happens.
+- **It cannot ping-pong.** The side that moved last owns the sync for `settle` ms and movement
+  reported by the other side is ignored for that long, so the echo of the editor's own scroll can
+  never come back as a new command; and neither side ever sends a line equal to the last one
+  exchanged, so the steady state produces no message at all. With the default `place = "top"` the
+  two directions share one reference point (the top of the viewport ↔ the top window line) and a
+  round trip is an exact fixed point. Measured: a single wheel step produces exactly one message
+  and then silence; 22 interleaved scrolls on both sides over five seconds produced 11 messages
+  and none at all in the three seconds after the last one.
+- Turning it on also makes the **editor→browser** jump instant and top-aligned instead of a
+  centred smooth glide. That is not a preference: a smooth animation keeps firing scroll events
+  long after the frame that caused it, and those are indistinguishable from your own scrolling.
+
+**The known limit: precision is block-level.** The anchors are blocks, so the exact line is only
+known at a block boundary. Inside a block the reported line is interpolated from how far the block
+has scrolled past the top of the viewport, which assumes its source lines are spread evenly over
+its rendered height — true for wrapped prose and code, approximate for a block whose height comes
+from something other than its text (an image, a diagram, a math display). The interpolation is
+clamped to the block, so the worst case is exactly the block's own first line. In practice
+scrolling to the middle of a long paragraph puts you on that paragraph, not on its exact line.
+
+```lua
+require("lvim-preview").setup({
+    sync_scroll_back = { enabled = true },
+})
+```
 
 ## Markdown
 
@@ -290,8 +351,8 @@ plugin's own BSD-3-Clause. **There is no vendored Markdown or org renderer**: bo
 parsed and rendered by our own Lua (`lua/lvim-preview/markdown/`, `lua/lvim-preview/org/`) and the
 page loads no parser library at all — every document kind this plugin serves is rendered in Lua
 before it reaches the browser. What remains vendored is not a parser but a LAYOUT engine: KaTeX
-typesets math and Mermaid lays out diagrams, and neither is a job a parser can do. What
-browser.
+typesets math and Mermaid lays out diagrams, and neither is a job a parser can do — plus a code
+highlighter, pdf.js for the artifact viewer, and one stylesheet.
 
 ## Health
 

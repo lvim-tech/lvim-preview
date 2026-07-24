@@ -172,11 +172,18 @@ function M.shell(kind, content, urlpath)
     -- `server_rendered` tells client.js that the payload is finished HTML to place, not a
     -- document to render — which is now every kind except AsciiDoc and SVG.
     local rendered = M.server_render(kind, content)
+    local back = config.sync_scroll_back or {}
     local cfg = vim.json.encode({
         kind = kind,
         path = urlpath,
         server_rendered = rendered ~= nil,
         features = client_features(),
+        -- Present ONLY when the browser→editor direction is on. Its presence is what switches the
+        -- client into two-way mode, so a page served while it is off can never report a scroll.
+        sync_scroll_back = back.enabled == true and {
+            throttle = math.max(0, back.throttle or 80),
+            settle = math.max(0, back.settle or 300),
+        } or nil,
     })
     head[#head + 1] = ("<script>window.__lvimPreview = %s;</script>"):format(cfg)
     head[#head + 1] = initial_block(rendered or content)

@@ -7,16 +7,17 @@ CONTENTS                                                      *lvim-preview*
   2. Setup .................................. |lvim-preview-setup|
   3. Commands ............................... |lvim-preview-commands|
   4. Root modes ............................. |lvim-preview-root|
-  5. Markdown ............................... |lvim-preview-markdown|
+  5. Sync scrolling ......................... |lvim-preview-scroll|
+  6. Markdown ............................... |lvim-preview-markdown|
      Parser API ............................. |lvim-preview-markdown-api|
-  6. org-mode ............................... |lvim-preview-org|
+  7. org-mode ............................... |lvim-preview-org|
      Parser API ............................. |lvim-preview-org-api|
-  7. Build artifacts ........................ |lvim-preview-artifacts|
-  8. Theme .................................. |lvim-preview-theme|
-  9. Safety ................................. |lvim-preview-safety|
- 10. Vendored assets ........................ |lvim-preview-vendor|
- 11. API .................................... |lvim-preview-api|
- 12. Health ................................. |lvim-preview-health|
+  8. Build artifacts ........................ |lvim-preview-artifacts|
+  9. Theme .................................. |lvim-preview-theme|
+ 10. Safety ................................. |lvim-preview-safety|
+ 11. Vendored assets ........................ |lvim-preview-vendor|
+ 12. API .................................... |lvim-preview-api|
+ 13. Health ................................. |lvim-preview-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *lvim-preview-intro*
@@ -27,15 +28,12 @@ Python — the server, the RFC 6455 WebSocket framing and the file watching are
 all `vim.uv`; the handshake SHA-1 (Neovim ships only sha256) is a small pure-Lua
 routine over LuaJIT's `bit`.
 
-Update model, per file kind:
-  - `markdown` and `org` — hot-update AS YOU TYPE. Changes to
-    the previewed buffer are pushed over the WebSocket (debounced). No save, no
-    temp files. `markdown` (|lvim-preview-markdown|) and `org`
-    (|lvim-preview-org|) are both rendered HERE, in Lua, and the frame
-    carries finished HTML. The page updates in place — it never reloads.
-  - `html` — served as authored (its own CSS / JS / images resolve against the
-    same root); a save pushes a reload. Save-driven by design — a half-typed tag
-    would thrash the DOM.
+Update model: `markdown` and `org` hot-update AS YOU TYPE. Changes to the
+previewed buffer are pushed over the WebSocket (debounced). No save, no temp
+files. Both (|lvim-preview-markdown|, |lvim-preview-org|) are rendered HERE, in
+Lua, and the frame carries finished HTML. The page updates in place — it never
+reloads. Scrolling is synchronised with the editor, in one direction or in both
+(|lvim-preview-scroll|).
 
 Beside DOCUMENTS (buffers this plugin renders), the server also displays
 ARTIFACTS: files another plugin PRODUCES, live-reloaded on that producer's
@@ -62,7 +60,14 @@ its default:
       root = "project",       -- "project" | "file" | "/explicit/path"
       serve_hidden = true,    -- serve dotfiles under the root (on)
       debounce = 100,         -- ms idle before a type-driven push
-      sync_scroll = true,     -- editor->browser scroll sync (md/adoc/org)
+      sync_scroll = true,     -- editor->browser scroll sync (md/org)
+      sync_scroll_back = {    -- browser->editor; see |lvim-preview-scroll|
+          enabled = false,    -- master gate (OFF: a page cannot move you)
+          move = "view",      -- "view" (keep the cursor) | "cursor"
+          place = "top",      -- "top" (shared reference point) | "center"
+          throttle = 80,      -- ms between two reports from the page
+          settle = 300,       -- ms the side that moved last owns the sync
+      },
       theme = "lvim",         -- "lvim" | "light" | "dark" | "auto"
       filetypes = { "markdown", "org" },
       features = {
@@ -146,7 +151,73 @@ served from their own directory under a reserved URL prefix, so build output can
 live anywhere on disk (|lvim-preview-artifacts|).
 
 ==============================================================================
-5. MARKDOWN                                          *lvim-preview-markdown*
+5. SYNC SCROLLING                                       *lvim-preview-scroll*
+
+Every block the Markdown and org renderers emit carries the source line it came
+from (`data-source-line`), so both directions address a LINE, not a percentage.
+
+EDITOR -> BROWSER                                 *lvim-preview-scroll-out*
+
+`sync_scroll` (on by default). Scrolling or moving the cursor in a previewed
+buffer sends its top window line; the page jumps to the block that line belongs
+to.
+
+BROWSER -> EDITOR                                  *lvim-preview-scroll-back*
+
+`sync_scroll_back.enabled` (on by default). Scrolling the page reports the
+source line at the top of its viewport and the editor follows. Three rules bound
+it:
+  - THE VIEW MOVES, NOT THE CURSOR (`move = "view"`). Scrolling is reading, not
+    editing, so the cursor stays where you left it. It is dragged along only
+    when the new view no longer holds it — exactly what CTRL-E / CTRL-Y do,
+    since a window's cursor cannot be off screen. `move = "cursor"` puts the
+    cursor on the reported line instead.
+  - NOTHING IS STOLEN. Only a window ALREADY showing that document, in the
+    CURRENT tabpage, is scrolled: no :edit, no buffer switch, no change of the
+    current window. When the document is not visible the message is discarded
+    and nothing happens at all.
+  - IT CANNOT PING-PONG. The side that moved last owns the sync for `settle` ms,
+    and movement reported by the other side is ignored for that long — so the
+    echo of the editor's own scroll can never come back as a new command. On top
+    of that neither side ever sends a line equal to the last one exchanged, so
+    the steady state produces no message at all. With the default `place =
+    "top"` both directions use ONE reference point (the top of the viewport <->
+    the top window line) and a round trip is an exact fixed point.
+
+Options (see |lvim-preview-setup| for the defaults):
+>lua
+  sync_scroll_back = {
+      enabled = false,   -- master gate
+      move = "view",     -- "view" (keep the cursor) | "cursor"
+      place = "top",     -- "top" (shared reference point) | "center" (zz-like)
+      throttle = 80,     -- ms between two reports from one page
+      settle = 300,      -- ms the side that moved last owns the sync
+  },
+<
+Turning it on also makes the EDITOR->BROWSER jump instant and top-aligned
+instead of a centred smooth glide. That is not a preference: a smooth animation
+keeps firing scroll events long after the frame that caused it, and those are
+indistinguishable from the reader's own scrolling.
+
+Enabling this is a deliberate relaxation of the passive-viewer rule
+(|lvim-preview-safety|): the server then accepts ONE extra message shape,
+`scroll_source`, only for a previewed markdown/org document. Everything else a
+page might send is still discarded.
+
+PRECISION IS BLOCK-LEVEL                          *lvim-preview-scroll-limit*
+
+The anchors are BLOCKS, so the exact line is only known at a block boundary.
+Inside a block the reported line is interpolated from how far that block has
+scrolled past the top of the viewport, which ASSUMES its source lines are spread
+evenly over its rendered height — true for wrapped prose and code, an
+approximation for a block whose height comes from something other than its text
+(an image, a diagram, a math display). The interpolation is clamped to the
+block, so the worst case is exactly the block's own first line: scrolling into
+the middle of a long paragraph puts you on that paragraph, not on its exact
+line.
+
+==============================================================================
+6. MARKDOWN                                          *lvim-preview-markdown*
 
 `.md` files are parsed and rendered to HTML by our own Lua, running in Neovim.
 There is no vendored Markdown library and the page loads no Markdown JavaScript
@@ -212,7 +283,7 @@ Parsing never raises and never drops input, so a caller needs no pcall for
 malformed documents.
 
 ==============================================================================
-6. ORG-MODE                                               *lvim-preview-org*
+7. ORG-MODE                                               *lvim-preview-org*
 
 `.org` files are parsed and rendered to HTML by OUR OWN LUA, running in Neovim.
 There is no vendored org library, the served page loads no org JavaScript, and
@@ -293,7 +364,7 @@ Parsing never raises and never drops input, so a caller needs no pcall for
 malformed documents.
 
 ==============================================================================
-7. BUILD ARTIFACTS                                  *lvim-preview-artifacts*
+8. BUILD ARTIFACTS                                  *lvim-preview-artifacts*
 
                                             *lvim-preview-register_artifact*
 A plugin that COMPILES something registers the file it produces; lvim-preview
@@ -379,7 +450,7 @@ INVERSE SEARCH
   every ordinary preview.
 
 ==============================================================================
-8. THEME                                                *lvim-preview-theme*
+9. THEME                                                *lvim-preview-theme*
 
 theme = "lvim" (default) generates the preview CSS variables from the live
 lvim-utils palette and re-pushes them to every open tab on `ColorScheme` and on
@@ -389,7 +460,7 @@ prefers-color-scheme decide. Code-block token colours use the highlight.js
 github light/dark theme.
 
 ==============================================================================
-9. SAFETY                                               *lvim-preview-safety*
+10. SAFETY                                               *lvim-preview-safety*
 
   - Loopback only by default (127.0.0.1). Binding any other address exposes the
     preview AND every file under the root to the LAN with NO authentication — an
@@ -401,16 +472,24 @@ github light/dark theme.
     moment the request is handed to the serve path, so a pipelined second
     request can never drive a second response on a closing socket. A request
     head that never terminates is capped at 32 KB and refused with 431.
-  - The browser never drives the editor: inbound WebSocket traffic is limited to
-    ping / pong / close. The page is a passive viewer. The single exception is
-    inverse search on a build artifact, gated twice — see
-    |lvim-preview-artifacts|.
+  - The browser never drives the editor unless a flag says it may: inbound
+    WebSocket traffic is limited to ping / pong / close, and the page is a
+    passive viewer. There are exactly two opt-in relaxations, each off by
+    default, each with its own flag and its own single accepted message:
+      * `artifact.allow_client_messages` — inverse search on a build artifact,
+        gated twice (it also needs that artifact's own `on_message` handler);
+        see |lvim-preview-artifacts|.
+      * `sync_scroll_back.enabled` — browser->editor sync scroll for a previewed
+        markdown/org document, applied only to a window that is already visible;
+        see |lvim-preview-scroll-back|.
+    Anything else a page sends — another message type, a message for something
+    that is not being served, any binary frame — is discarded as it always was.
   - Teardown is complete on stop / VimLeavePre — every client handle, every
     debounce timer, every artifact watcher and the listener are closed, so no
     port is orphaned and no libuv handle leaks across preview/stop cycles.
 
 ==============================================================================
-10. VENDORED ASSETS                                      *lvim-preview-vendor*
+11. VENDORED ASSETS                                      *lvim-preview-vendor*
 
 Every browser render asset is pinned and served locally from `static/vendor/`
 (KaTeX with its fonts and the mhchem contrib, Mermaid, highlight.js,
@@ -427,7 +506,7 @@ vendored without its `cmaps/` (CJK encodings) and `wasm/` (JPEG-2000 decoders)
 directories.
 
 ==============================================================================
-11. API                                                    *lvim-preview-api*
+12. API                                                    *lvim-preview-api*
 
 require("lvim-preview").setup(opts)     Configure / start (idempotent).
 require("lvim-preview").start(file?)    Preview `file` or the current buffer.
@@ -453,7 +532,7 @@ See |lvim-preview-artifacts| for the artifact spec and handle contract, and
 |lvim-preview-markdown-api| / |lvim-preview-org-api| for the parser trees.
 
 ==============================================================================
-12. HEALTH                                              *lvim-preview-health*
+13. HEALTH                                              *lvim-preview-health*
 
 :checkhealth lvim-preview checks the Neovim / LuaJIT `bit` runtime, the optional
 ecosystem integrations (lvim-utils / lvim-ui / lvim-hud / lvim-icons), the

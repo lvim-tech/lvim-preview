@@ -29,6 +29,14 @@
 ---@field markdown     LvimPreviewMarkdownFeature  markdown renderer options
 ---@field org          LvimPreviewOrgFeature  org renderer options
 
+---@class LvimPreviewSyncScrollBack
+---@field enabled  boolean  Master gate for the BROWSER→EDITOR direction. On by default.
+---@field move     "view"|"cursor"  What a page scroll moves: the window's view (the cursor stays
+---                                  where you left it) or the cursor itself.
+---@field place    "top"|"center"   Where the reported line lands in the window.
+---@field throttle integer  ms between two scroll reports from one page.
+---@field settle   integer  ms one side keeps ownership of the sync after it moved the other.
+
 ---@class LvimPreviewArtifactPdf
 ---@field restore_position boolean  keep page / scroll / zoom across a producer reload
 ---@field highlight_ms     integer  ms a forward-search highlight rect stays visible
@@ -52,6 +60,7 @@
 ---                                   readable by anything on this machine, so set false to lock it down).
 ---@field debounce   integer         ms of idle before a type-driven push (md/org/svg).
 ---@field sync_scroll boolean        Editor→browser scroll sync (md/org).
+---@field sync_scroll_back LvimPreviewSyncScrollBack  Browser→editor scroll sync (md/org), on by default.
 ---@field theme      "lvim"|"light"|"dark"|"auto"  Preview theme; "lvim" tracks the live palette.
 ---@field filetypes  string[]        Render kinds enabled for preview — the gate for the picker,
 ---                                   `preview_file` AND the HTTP router (see util.EXT_KIND).
@@ -82,6 +91,28 @@ return {
     serve_hidden = true,
     debounce = 100,
     sync_scroll = true,
+    -- The WAY BACK: scrolling the PAGE scrolls the editor. On by default, and separately gated
+    -- from `artifact.allow_client_messages` — this is the second, equally narrow relaxation of
+    -- "the browser is a passive viewer", and the server accepts exactly one message shape for it.
+    sync_scroll_back = {
+        enabled = true,
+        -- "view" — scroll the WINDOW and leave the cursor where you left it (scrolling is reading,
+        --   not editing). The cursor is only dragged along when the new view no longer contains
+        --   it, exactly as CTRL-E / CTRL-Y drag it.
+        -- "cursor" — put the cursor on the reported line as well.
+        move = "view",
+        -- "top" — the reported line becomes the top window line. That is the SAME reference point
+        --   the page reports (the source line at the top of the viewport) and the same one the
+        --   editor sends outward (`line("w0")`), so a round trip is a fixed point and the two
+        --   directions cannot chase each other. "center" is `zz`-like and is a deliberate
+        --   asymmetry — only the settle window below keeps it stable.
+        place = "top",
+        -- ms between two reports while a page scroll is in flight (a scroll event fires per frame).
+        throttle = 80,
+        -- ms one side OWNS the sync after it moved the other; movement from the other side is
+        -- ignored for that long. See scroll.lua for why this value.
+        settle = 300,
+    },
     theme = "lvim",
     -- The render KINDS (not extensions) this plugin will preview. Removing one makes every file
     -- that maps to it non-previewable everywhere at once — the picker stops offering it,

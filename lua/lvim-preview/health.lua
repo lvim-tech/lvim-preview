@@ -201,13 +201,40 @@ local function check_config(h)
         h.error("config.filetypes enables no renderable kind — nothing can be previewed")
     end
 
-    -- The passive-viewer rule is a documented safety property; note when it has been relaxed.
+    -- The passive-viewer rule is a documented safety property; note EVERY relaxation of it.
     if config.artifact.allow_client_messages then
         h.warn(
             "artifact.allow_client_messages is ON — a viewer page may send messages to artifacts "
                 .. "whose producer registered an on_message handler (inverse search). Ordinary "
                 .. "previews stay passive."
         )
+    end
+    local back = config.sync_scroll_back or {}
+    if back.enabled then
+        h.warn(
+            (
+                "sync_scroll_back is ON — a previewed page may scroll the editor window showing its "
+                .. "document (move = %s, place = %s, throttle = %sms, settle = %sms). Only the "
+                .. "`scroll_source` message is accepted, only for a previewed markdown/org "
+                .. "document, and only into a window that is already visible."
+            ):format(
+                tostring(back.move),
+                tostring(back.place),
+                tostring(back.throttle),
+                tostring(back.settle)
+            )
+        )
+    end
+    if back.move ~= "view" and back.move ~= "cursor" then
+        h.error(('sync_scroll_back.move must be "view"|"cursor" (got %s)'):format(vim.inspect(back.move)))
+    end
+    if back.place ~= "top" and back.place ~= "center" then
+        h.error(('sync_scroll_back.place must be "top"|"center" (got %s)'):format(vim.inspect(back.place)))
+    end
+    for _, key in ipairs({ "throttle", "settle" }) do
+        if type(back[key]) ~= "number" or back[key] < 0 then
+            h.error(("sync_scroll_back.%s must be a number >= 0 (got %s)"):format(key, vim.inspect(back[key])))
+        end
     end
 end
 

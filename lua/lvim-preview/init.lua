@@ -5,7 +5,7 @@
 --              (pure-Lua sha1) and frame codec, and the broadcast fan-out.
 --   watch    — the previewed buffer's live-update autocmds (type-driven md/org/svg,
 --              save-driven html) + the content cache the fast HTTP path serves.
---   scroll   — editor->browser sync scroll.
+--   scroll   — sync scroll: editor->browser always, browser->editor when opted in.
 --   theme    — the palette-generated preview CSS, re-pushed on ColorScheme.
 --   template — the served HTML shells; picker / browser — the chooser and the opener.
 --   artifact — the PRODUCER seam: a file another plugin builds, served and reloaded on its
@@ -16,8 +16,10 @@
 -- displays. Both keep the one server alive; it stops when the last of either closes.
 --
 -- One server per Neovim instance; it is torn down on `:LvimPreview stop` and on VimLeavePre.
--- Loopback-only by default (see config.address); the browser is a passive viewer and never
--- drives the editor (the one opt-in exception is documented in artifact.lua).
+-- Loopback-only by default (see config.address); the browser is a passive viewer and never drives
+-- the editor unless one of the two opt-in gates is switched on — artifact inverse search
+-- (artifact.lua) and browser->editor sync scroll (scroll.lua). Both are off by default and each
+-- accepts only its own message shape; the gate itself lives in server/init.lua's `on_ws_bytes`.
 --
 ---@module "lvim-preview"
 
@@ -224,7 +226,14 @@ function M.preview_file(file)
     -- NOTE: no global `reload` broadcast here. The server already serves every registered
     -- document, so a new preview must not yank the tabs showing the others onto it.
 
-    if config.auto_open then
+    -- Auto-open, UNLESS a collision with another Neovim just bumped us to a different port: opening
+    -- a tab there would look like success while showing a second, unwanted server. Hand over the URL
+    -- so the user opens it deliberately if that is really what they want.
+    if state.collided_port then
+        notify(
+            ("this buffer's preview is at %s — open it by hand if you want a second server"):format(preview_url(doc))
+        )
+    elseif config.auto_open then
         browser.open(preview_url(doc), config.browser)
     end
     return true

@@ -48,6 +48,7 @@
 ---@field running   boolean            Whether the server is currently listening.
 ---@field host      string             The address actually bound.
 ---@field port      integer            The port actually bound (may differ from config when auto_port scanned).
+---@field collided_port integer?  set when a start hit another lvim-preview on the preferred port (suppresses auto-open)
 ---@field root      string             Absolute, normalised servable root.
 ---@field docs      table<string, LvimPreviewDoc>  Previewed documents, keyed by absolute path.
 ---@field artifacts table<string, LvimPreviewArtifact>  Registered artifacts, keyed by producer id.

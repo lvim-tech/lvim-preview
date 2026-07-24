@@ -11,6 +11,8 @@
 -- as frames) or is served one GET response and closed. Server→client pushes (reload / update /
 -- scroll / theme) are broadcast to every upgraded client, so several browser tabs stay in sync.
 --
+-- The reverse path is deliberately narrow and is described where it is enforced, on `on_ws_bytes`.
+--
 ---@module "lvim-preview.server"
 
 local uv = vim.uv
@@ -61,12 +63,20 @@ end
 --- Handle bytes on an already-upgraded WebSocket client: decode whole frames out of the
 --- rolling buffer and act on control frames.
 ---
---- DATA frames are ignored by default — the browser is a passive viewer and must never drive the
---- editor (safety rule). The ONE relaxation is inverse search for build artifacts, and it is
---- deliberately narrow: a TEXT frame is handed on only when `config.artifact.allow_client_messages`
---- is on, and the artifact module then drops anything that does not address a registered artifact
---- whose producer supplied an `on_message` handler. Everything else — every ordinary document
---- preview, every artifact that did not opt in, every binary frame — keeps being discarded.
+--- DATA frames are discarded by default — the browser is a passive viewer and must never drive
+--- the editor (safety rule). There are exactly TWO relaxations, each with its OWN config flag and
+--- its own narrow acceptance test, and neither can widen the other:
+---   * `config.artifact.allow_client_messages` — inverse search for build ARTIFACTS. The artifact
+---     module then drops anything that does not address a registered artifact whose producer
+---     supplied an `on_message` handler.
+---   * `config.sync_scroll_back.enabled` — browser→editor sync SCROLL for a previewed DOCUMENT.
+---     The scroll module accepts one single message shape (`type = "scroll_source"` with a `path`
+---     and a `line`) addressed to a currently previewed markdown/org document, and discards
+---     everything else.
+--- A frame is offered to each enabled gate and the gates never see each other's messages: an
+--- artifact page's message finds no document, a document's message finds no artifact, and an
+--- unknown message from either kind of connection is discarded exactly as it was before either
+--- relaxation existed. With both flags off — the default — every data frame is still dropped here.
 ---@param ctx LvimPreviewClientCtx
 ---@param chunk string
 local function on_ws_bytes(ctx, chunk)
@@ -83,10 +93,15 @@ local function on_ws_bytes(ctx, chunk)
             pcall(function()
                 ctx.tcp:write(websocket.pong_frame(f.payload))
             end)
-        elseif f.opcode == 0x1 and config.artifact.allow_client_messages then
-            -- Inline require: artifact.lua requires this module for broadcast, so hoisting it
+        elseif f.opcode == 0x1 then
+            -- Inline requires: both modules require this one for broadcast, so hoisting either
             -- would be a load-time cycle.
-            require("lvim-preview.artifact").dispatch_client_message(f.payload)
+            if config.artifact.allow_client_messages then
+                require("lvim-preview.artifact").dispatch_client_message(f.payload)
+            end
+            if config.sync_scroll_back.enabled then
+                require("lvim-preview.scroll").dispatch_client_message(f.payload)
+            end
         end
         -- 0xA pong and 0x2 binary frames: ignored.
     end
@@ -172,6 +187,53 @@ local function on_connection(server)
     end)
 end
 
+--- Is another lvim-preview server ALREADY listening on host:port (a second Neovim)? A short,
+--- synchronous libuv probe: connect, send a bare GET, look for our `Server: lvim-preview` header.
+--- Times out fast — a busy port that is NOT us (some other program) simply answers "no".
+---@param host string
+---@param port integer
+---@return boolean
+local function ours_on(host, port)
+    local done, result = false, false
+    local c = uv.new_tcp()
+    local timer = uv.new_timer()
+    local function finish(v)
+        if done then
+            return
+        end
+        done = true
+        result = v
+        pcall(function()
+            timer:stop()
+            timer:close()
+        end)
+        pcall(function()
+            if c and not c:is_closing() then
+                c:close()
+            end
+        end)
+    end
+    timer:start(400, 0, function()
+        finish(false)
+    end)
+    c:connect(host, port, function(err)
+        if err then
+            return finish(false)
+        end
+        c:write("GET /@lvim-preview/ HTTP/1.0\r\nHost: probe\r\n\r\n")
+        c:read_start(function(rerr, chunk)
+            if rerr or not chunk then
+                return finish(false)
+            end
+            finish(chunk:lower():find("server: lvim-preview", 1, true) ~= nil)
+        end)
+    end)
+    vim.wait(500, function()
+        return done
+    end)
+    return result
+end
+
 --- Try to bind `host:port`; on EADDRINUSE with auto_port, scan upward up to `limit` ports.
 --- Returns the bound listener and the chosen port, or nil + an error string.
 ---@param host string
@@ -195,6 +257,20 @@ local function bind_scan(host, port, limit)
         end)
         local es = tostring(err)
         local busy = es:match("EADDRINUSE") or es:match("address already in use")
+        -- A port taken by ANOTHER lvim-preview (a second Neovim) is the trap that reads as "nothing
+        -- updates": edits go to this instance's server on a bumped port while the browser watches
+        -- the other one. Auto_port would hide it, so say it out loud, ONCE, on the preferred port.
+        if busy and p == port and ours_on(host, p) then
+            -- A real collision with another Neovim. Record it so preview_file does NOT auto-open a
+            -- browser tab: a fresh tab on the bumped port is exactly the misleading thing — it looks
+            -- like the preview opened, but it is a second server the user never meant to start.
+            state.collided_port = p
+            notify(
+                ("port %d is already serving lvim-preview from another Neovim instance — not opening a "):format(p)
+                    .. "browser. Close the other Neovim, or open this buffer's own URL by hand (see below).",
+                vim.log.levels.WARN
+            )
+        end
         if not busy or not config.auto_port then
             return nil, es
         end
@@ -223,8 +299,28 @@ function M.start(host, port)
     if state.running then
         return true
     end
+    state.collided_port = nil
+    -- CHECK FOR ANOTHER lvim-preview FIRST, before binding. libuv sets SO_REUSEADDR, so on loopback a
+    -- second bind to the SAME port can SUCCEED — two servers listening, the browser talking to one
+    -- while this instance edits the buffer behind the other. There is then no EADDRINUSE to react to,
+    -- so the only reliable signal is to probe the port up front. A collision skips the preferred port
+    -- and scans from the next one, and records itself so preview_file does not auto-open a stray tab.
+    local start_port = port
+    if ours_on(host, port) then
+        state.collided_port = port
+        notify(
+            ("port %d is already serving lvim-preview from ANOTHER Neovim instance. A browser tab on %d "):format(
+                port,
+                port
+            )
+                .. "is controlled by that other Neovim, not this buffer — not opening one. Close the other "
+                .. "Neovim, or open this buffer's own URL by hand (shown below).",
+            vim.log.levels.WARN
+        )
+        start_port = port + 1
+    end
     local limit = config.auto_port and 50 or 1
-    local server, chosen = bind_scan(host, port, limit)
+    local server, chosen = bind_scan(host, start_port, limit)
     if not server then
         return false, tostring(chosen)
     end

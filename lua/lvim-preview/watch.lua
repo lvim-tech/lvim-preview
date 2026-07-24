@@ -1,10 +1,8 @@
--- lvim-preview.watch: the live-update wiring of every previewed buffer. Two update models, per
--- the document kind:
---   * markdown / org — push AS YOU TYPE. TextChanged/TextChangedI on that buffer
---     refresh its content cache and, debounced by config.debounce, broadcast an `update` frame;
---     the browser re-renders client-side. No save, no temp file.
---   * html — push on SAVE. A half-typed tag would thrash the DOM, so BufWritePost broadcasts a
---     `reload` and the browser refetches the page (and its own css/js/img) from the server.
+-- lvim-preview.watch: the live-update wiring of every previewed buffer. One update model, for the
+-- two kinds that remain previewable: markdown and org push AS YOU TYPE. TextChanged/TextChangedI
+-- on that buffer refresh its content cache and, debounced by config.debounce, broadcast an
+-- `update` frame carrying the finished HTML (both renderers are ours and run here). The page
+-- replaces its content in place — no save, no temp file, no reload.
 --
 -- PER DOCUMENT, not per session: each previewed file owns its augroup and its debounce timer, so
 -- any number of documents stay live at once and previewing a new one never detaches the others.
@@ -64,9 +62,9 @@ M.refresh_content = refresh_content
 --- Broadcast a document's cached content as an `update` frame. The `path` addresses it: tabs
 --- showing another document ignore the frame.
 ---
---- For a kind this plugin renders in Lua (org), the frame carries finished HTML and
---- `server_rendered = true`; the client places it instead of running a renderer. Same function
---- the HTTP shell uses, so first paint and every live update can never disagree.
+--- Both previewable kinds (markdown, org) are rendered in Lua here, so the frame carries finished
+--- HTML and `server_rendered = true`; the client places it instead of running a renderer. Same
+--- function the HTTP shell uses, so first paint and every live update can never disagree.
 ---@param doc LvimPreviewDoc
 local function push_update(doc)
     local content = doc.content or ""
@@ -111,6 +109,20 @@ function M.attach(doc)
     local name = "LvimPreviewWatch_" .. seq
     groups[doc.file] = name
     local grp = api.nvim_create_augroup(name, { clear = true })
+    -- Watch the FILE, not a fixed bufnr. lvim-space (and `:edit`, a session restore, a buffer
+    -- reload) recreates the buffer for a file under a NEW number; a buffer-scoped autocmd would be
+    -- stranded on the dead handle and live updates would silently die until `:LvimPreview` was
+    -- restarted. A `pattern` autocmd re-matches on every event, so whichever buffer currently holds
+    -- the file is the one that fires; the callback re-reads the live bufnr from the event so the
+    -- content cache follows the file rather than a stale handle.
+    api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
+        group = grp,
+        pattern = doc.file,
+        callback = function(ev)
+            doc.bufnr = ev.buf
+            on_text_changed(doc)
+        end,
+    })
 end
 
 --- Remove ONE document's autocmds and release its debounce timer.

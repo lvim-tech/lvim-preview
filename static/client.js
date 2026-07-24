@@ -13,15 +13,21 @@
 // `viewer = "pdf"`, the page itself for `viewer = "html"`) and reacts to the producer's frames
 // (`artifact` = refetch, `status` = overlay, `synctex` = scroll + flash).
 //
-// The browser is a PASSIVE viewer: it never sends anything that drives the editor. The single
-// exception is inverse search on a pdf artifact, which requires BOTH the server-side config gate
-// (config.artifact.allow_client_messages) and the artifact's own on_message handler.
+// The browser is a PASSIVE viewer: it sends nothing that drives the editor unless the editor's own
+// config opted in. There are exactly two such opt-ins, each with its own server-side gate:
+//   * inverse search on a pdf artifact — needs config.artifact.allow_client_messages AND that
+//     artifact's own on_message handler;
+//   * sync scroll back (this page reporting the source line at the top of its viewport) — needs
+//     config.sync_scroll_back.enabled, whose presence in the config block below is what puts this
+//     client into two-way mode at all.
 (function () {
   "use strict";
 
   var CFG = window.__lvimPreview || { kind: "html", features: {} };
   var FEAT = CFG.features || {};
   var ART = CFG.artifact || null;
+  // { throttle, settle } when the editor enabled browser→editor scroll, else null.
+  var BACK = CFG.sync_scroll_back || null;
   var STATIC = "/@lvim-preview/";
   var content = document.getElementById("lp-content");
 
@@ -115,7 +121,17 @@
     }
   }
 
-  // ---- sync scroll ---------------------------------------------------------
+  // ---- sync scroll: editor -> browser --------------------------------------
+  // One-way mode keeps what it always did: a smooth glide with the block CENTRED.
+  // Two-way mode must differ on both counts, and neither is a preference:
+  //   * block "start" — the page reports the source line at the TOP of its viewport, so the
+  //     editor's top line and the page's top line have to be the same reference point. Centring
+  //     here would make every round trip land somewhere new and the two sides would chase.
+  //   * behavior "auto" — a smooth animation keeps firing scroll events for hundreds of ms after
+  //     the frame that caused it, and an animation's event is indistinguishable from a user's. An
+  //     instant jump produces one event we can attribute with certainty.
+  var SCROLL_INTO = BACK ? { behavior: "auto", block: "start" } : { behavior: "smooth", block: "center" };
+
   function scrollToLine(line, total) {
     var nodes = content.querySelectorAll("[data-source-line]");
     if (nodes.length) {
@@ -129,14 +145,104 @@
         target = nodes[i];
       }
       if (target) {
-        target.scrollIntoView({ behavior: "smooth", block: "center" });
+        target.scrollIntoView(SCROLL_INTO);
         return;
       }
     }
     // Fallback: proportional scroll for renderers without source anchors.
     if (total && total > 1) {
       var ratio = (line - 1) / (total - 1);
-      window.scrollTo({ top: ratio * (document.body.scrollHeight - window.innerHeight), behavior: "smooth" });
+      window.scrollTo({
+        top: ratio * (document.body.scrollHeight - window.innerHeight),
+        behavior: SCROLL_INTO.behavior,
+      });
+    }
+  }
+
+  // ---- sync scroll: browser -> editor --------------------------------------
+  // Off unless the editor enabled it (BACK). What is reported is the source line at the TOP of the
+  // viewport — the same reference point the editor sends outward, which is what makes a round trip
+  // a fixed point instead of a chase.
+  //
+  // Two guards keep this from oscillating with the editor, and they are the client half of the
+  // pair the editor keeps (see lua/lvim-preview/scroll.lua):
+  //   * `quietUntil` — for `settle` ms after the editor scrolled us, our own scroll events are
+  //     ours-because-of-them and are not reported. It is NOT extended by those events, so control
+  //     always comes back after one quiet interval.
+  //   * `lastLine` — neither side ever sends a line equal to the last one exchanged, so the steady
+  //     state after a jump produces no message at all.
+  var back = { quietUntil: 0, lastLine: 0, last: 0, timer: null };
+
+  /**
+   * The source line at the top of the viewport.
+   *
+   * Anchors are per BLOCK, so the exact line is only known at a block boundary. Within a block we
+   * interpolate, and the assumption is stated rather than hidden: the block's source lines are
+   * taken to be spread EVENLY over its rendered height. That holds for wrapped prose and for a
+   * code block; it is an approximation for a block whose height comes from something other than
+   * its text (an image, a rendered diagram, a math display). The interpolation can never leave the
+   * block — it is clamped to the line before the next anchor — so the worst case is exactly the
+   * uninterpolated block-level answer.
+   */
+  function topSourceLine() {
+    if (!content) return 0;
+    var nodes = content.querySelectorAll("[data-source-line]");
+    if (!nodes.length) return 0;
+    // Block flow puts a container's top at or above its first child's, and each sibling below the
+    // previous one, so tops are non-decreasing in DOM order: the LAST node still at or above the
+    // viewport top is the deepest (most precise) anchor owning it.
+    var idx = -1;
+    var rect = null;
+    for (var i = 0; i < nodes.length; i++) {
+      var r = nodes[i].getBoundingClientRect();
+      if (r.top > 0) break;
+      idx = i;
+      rect = r;
+    }
+    if (idx < 0) return parseInt(nodes[0].getAttribute("data-source-line"), 10) || 0;
+    var line = parseInt(nodes[idx].getAttribute("data-source-line"), 10);
+    if (!line) return 0;
+    // The first following anchor on a LATER line bounds this block's line span (a container and
+    // its first child share a line, which is why the comparison is strict).
+    var next = 0;
+    for (var j = idx + 1; j < nodes.length; j++) {
+      var nl = parseInt(nodes[j].getAttribute("data-source-line"), 10);
+      if (nl > line) {
+        next = nl;
+        break;
+      }
+    }
+    var span = next ? next - line : 0;
+    if (span > 1 && rect && rect.height > 0) {
+      var f = Math.min(1, Math.max(0, -rect.top / rect.height));
+      line += Math.min(span - 1, Math.floor(f * span));
+    }
+    return line;
+  }
+
+  function reportScroll() {
+    if (!BACK || Date.now() < back.quietUntil) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    var line = topSourceLine();
+    if (!line || line === back.lastLine) return;
+    back.lastLine = line;
+    socket.send(JSON.stringify({ type: "scroll_source", path: CFG.path, line: line }));
+  }
+
+  // Leading + trailing throttle: a scroll event fires per frame, so report at most every
+  // BACK.throttle ms, and always report where the scroll came to rest.
+  function onPageScroll() {
+    var now = Date.now();
+    var wait = BACK.throttle - (now - back.last);
+    if (wait <= 0) {
+      back.last = now;
+      reportScroll();
+    } else if (!back.timer) {
+      back.timer = setTimeout(function () {
+        back.timer = null;
+        back.last = Date.now();
+        reportScroll();
+      }, wait);
     }
   }
 
@@ -361,7 +467,15 @@
       } else if (msg.type === "update") {
         if (pathMatches(msg.path)) render(msg.content, msg.server_rendered === true);
       } else if (msg.type === "scroll") {
-        if (pathMatches(msg.path)) scrollToLine(msg.line, msg.total);
+        if (pathMatches(msg.path)) {
+          if (BACK) {
+            // The editor owns the sync for `settle` ms: the scroll event our own jump is about to
+            // fire is its echo, not the reader moving the page.
+            back.quietUntil = Date.now() + BACK.settle;
+            back.lastLine = msg.line;
+          }
+          scrollToLine(msg.line, msg.total);
+        }
       } else if (msg.type === "artifact") {
         // The producer says the file is new and coherent. Bump our cache-bust token and
         // refetch; a pdf viewer re-renders in place, any other artifact page reloads.
@@ -409,6 +523,10 @@
       }
     } else if (CFG.kind !== "html") {
       render(initialText(), CFG.server_rendered === true);
+    }
+    // Only a DOCUMENT page reports scrolls: an artifact has no source lines to report.
+    if (BACK && !ART && content) {
+      window.addEventListener("scroll", onPageScroll, { passive: true });
     }
     connect();
     // Reconnect poll: if the socket dropped, try again (onopen reloads the page).
