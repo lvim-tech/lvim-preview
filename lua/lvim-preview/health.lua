@@ -86,7 +86,7 @@ local function check_integrations(h)
     end
     for _, mod in ipairs({
         { "lvim-ui", ":LvimPreview pick chooser" },
-        { "lvim-hud.overlay", "serving chip" },
+        { "lvim-hud.chrome.parts", "themed `hud_segment()` serving marker" },
         { "lvim-icons", "per-file icons in the chooser" },
     }) do
         if pcall(require, mod[1]) then

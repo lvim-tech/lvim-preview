@@ -45,22 +45,58 @@ local function notify(msg, level)
     end
 end
 
---- Update the lvim-hud serving chip (shown while the server runs). No-op when hud_chip is off
---- or lvim-hud is absent (loaded lazily + pcall-guarded — cross-plugin).
----@param on boolean
-local function chip(on)
-    if not config.hud_chip then
-        return
+--- Is `bufnr` (default: the current buffer) one of the documents this server is previewing?
+--- Public, framework-agnostic — a statusline / winbar of any kind can gate on it.
+---@param bufnr integer?
+---@return boolean
+function M.is_previewing(bufnr)
+    if not server.is_running() then
+        return false
     end
-    local ok, overlay = pcall(require, "lvim-hud.overlay")
-    if not ok then
-        return
+    return state.doc_for_buf(bufnr or vim.api.nvim_get_current_buf()) ~= nil
+end
+
+--- The plain "serving" text for `bufnr` — `""` when that buffer is not previewed, so a statusline
+--- can concatenate it unconditionally. No highlight markup: any framework can render it its own
+--- way (`hud_segment` below wraps this for the lvim-hud chrome).
+---@param bufnr integer?
+---@return string
+function M.status_text(bufnr)
+    if not M.is_previewing(bufnr) then
+        return ""
     end
-    if on then
-        pcall(overlay.set, { icon = config.icons.server, title = ("preview :%d"):format(state.port) })
-    else
-        pcall(overlay.clear)
-    end
+    return ("%s :%d"):format(config.icons.server or "", state.port)
+end
+
+--- A ready-made lvim-hud chrome SEGMENT for the "serving" indicator — drop it into a statusline /
+--- winbar segment list (the lvim-breadcrumbs `hud_segment` pattern).
+---
+--- It renders ONLY in a buffer that is actually being previewed, so the marker follows the cursor:
+--- move to an unrelated file and it disappears. This deliberately does NOT use `lvim-hud.overlay` —
+--- that is the transient ECHO area, which the statusline shows INSTEAD of the file segments, so
+--- holding it for the server's whole lifetime blanked the real statusline (path / git / LSP) the
+--- entire time a preview was open.
+---@param opts { name?: string, inactive?: boolean }?
+---@return table  LvimChromeSegment
+function M.hud_segment(opts)
+    opts = opts or {}
+    return {
+        name = opts.name or "preview",
+        when = function(ctx)
+            if not config.hud_chip then
+                return false
+            end
+            if not (opts.inactive or ctx.active) then
+                return false
+            end
+            return M.is_previewing(ctx.buf)
+        end,
+        content = function(ctx)
+            local ok, parts = pcall(require, "lvim-hud.chrome.parts")
+            local text = " " .. M.status_text(ctx.buf) .. " "
+            return ok and parts.seg("Green", text) or text
+        end,
+    }
 end
 
 --- Resolve the servable root for a previewed file per config.root.
@@ -175,7 +211,6 @@ function M.preview_file(file)
             notify("could not start the server: " .. tostring(err), vim.log.levels.ERROR)
             return false
         end
-        chip(true)
         local warn = not util.is_loopback(state.host) and "  (LAN-exposed, no auth)" or ""
         notify(("serving %s:%d%s"):format(display_host(), state.port, warn))
     end
@@ -232,7 +267,6 @@ function M.stop(file)
     watch.detach_all()
     scroll.detach_all()
     server.stop()
-    chip(false)
     state.docs = {}
     notify("stopped")
 end
