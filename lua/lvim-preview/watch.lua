@@ -1,6 +1,6 @@
 -- lvim-preview.watch: the live-update wiring of every previewed buffer. Two update models, per
 -- the document kind:
---   * markdown / asciidoc / svg — push AS YOU TYPE. TextChanged/TextChangedI on that buffer
+--   * markdown / org — push AS YOU TYPE. TextChanged/TextChangedI on that buffer
 --     refresh its content cache and, debounced by config.debounce, broadcast an `update` frame;
 --     the browser re-renders client-side. No save, no temp file.
 --   * html — push on SAVE. A half-typed tag would thrash the DOM, so BufWritePost broadcasts a
@@ -21,6 +21,7 @@ local uv = vim.uv
 local config = require("lvim-preview.config")
 local state = require("lvim-preview.state")
 local server = require("lvim-preview.server")
+local template = require("lvim-preview.template")
 
 local M = {}
 
@@ -30,6 +31,22 @@ local groups = {}
 local timers = {}
 ---@type integer  augroup-name counter (a path is not a legal group name)
 local seq = 0
+
+--- Release ONE document's debounce timer: stop it AND close the libuv handle, then forget it.
+--- `stop()` alone leaves the handle open and the registry entry behind, so a preview/stop cycle
+--- repeated N times used to hold N live uv_timer_t handles until VimLeavePre.
+---@param path string  the document's absolute path (the timer registry key)
+---@return nil
+local function release_timer(path)
+    local t = timers[path]
+    if t then
+        if not t:is_closing() then
+            t:stop()
+            t:close()
+        end
+        timers[path] = nil
+    end
+end
 
 --- Read a document's buffer into its content cache. Main thread only.
 ---@param doc LvimPreviewDoc
@@ -44,11 +61,22 @@ end
 
 M.refresh_content = refresh_content
 
---- Broadcast a document's cached content as an `update` frame (md/adoc/svg live render). The
---- `path` addresses it: tabs showing another document ignore the frame.
+--- Broadcast a document's cached content as an `update` frame. The `path` addresses it: tabs
+--- showing another document ignore the frame.
+---
+--- For a kind this plugin renders in Lua (org), the frame carries finished HTML and
+--- `server_rendered = true`; the client places it instead of running a renderer. Same function
+--- the HTTP shell uses, so first paint and every live update can never disagree.
 ---@param doc LvimPreviewDoc
 local function push_update(doc)
-    server.broadcast({ type = "update", path = doc.url_path, content = doc.content or "" })
+    local content = doc.content or ""
+    local rendered = template.server_render(doc.filetype, content)
+    server.broadcast({
+        type = "update",
+        path = doc.url_path,
+        content = rendered or content,
+        server_rendered = rendered ~= nil,
+    })
 end
 
 --- Debounced type-driven push for ONE document: refresh its cache now (so an immediate reconnect
@@ -83,39 +111,9 @@ function M.attach(doc)
     local name = "LvimPreviewWatch_" .. seq
     groups[doc.file] = name
     local grp = api.nvim_create_augroup(name, { clear = true })
-
-    if doc.filetype == "html" then
-        -- Save-driven: refetch the page on write. A reload is per-tab (each refetches its own
-        -- URL), so it is safe to broadcast even with other documents open.
-        api.nvim_create_autocmd("BufWritePost", {
-            group = grp,
-            buffer = doc.bufnr,
-            callback = function()
-                server.broadcast({ type = "reload", path = doc.url_path })
-            end,
-        })
-    else
-        -- Type-driven: push on every change; also refresh + push on save (a formatter that
-        -- rewrites the buffer on save fires BufWritePost, not always TextChanged).
-        api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
-            group = grp,
-            buffer = doc.bufnr,
-            callback = function()
-                on_text_changed(doc)
-            end,
-        })
-        api.nvim_create_autocmd("BufWritePost", {
-            group = grp,
-            buffer = doc.bufnr,
-            callback = function()
-                refresh_content(doc)
-                push_update(doc)
-            end,
-        })
-    end
 end
 
---- Remove ONE document's autocmds and stop its debounce timer.
+--- Remove ONE document's autocmds and release its debounce timer.
 ---@param doc LvimPreviewDoc
 ---@return nil
 function M.detach(doc)
@@ -124,36 +122,27 @@ function M.detach(doc)
         pcall(api.nvim_del_augroup_by_name, name)
         groups[doc.file] = nil
     end
-    local t = timers[doc.file]
-    if t and not t:is_closing() then
-        t:stop()
-    end
+    release_timer(doc.file)
 end
 
---- Detach every document (server stop / VimLeavePre).
+--- Detach every document (server stop / VimLeavePre). Attaching again re-creates both the
+--- augroup and the timer, so releasing here leaves nothing behind.
 ---@return nil
 function M.detach_all()
     for path, name in pairs(groups) do
         pcall(api.nvim_del_augroup_by_name, name)
         groups[path] = nil
     end
-    for _, t in pairs(timers) do
-        if t and not t:is_closing() then
-            t:stop()
-        end
+    for path in pairs(timers) do
+        release_timer(path)
     end
 end
 
---- Release every debounce timer's libuv handle (VimLeavePre).
+--- Full teardown (VimLeavePre). Identical to detach_all now that detaching releases the
+--- handles; kept as the named exit hook init.lua calls.
 ---@return nil
 function M.dispose()
     M.detach_all()
-    for path, t in pairs(timers) do
-        if t and not t:is_closing() then
-            t:close()
-        end
-        timers[path] = nil
-    end
 end
 
 return M

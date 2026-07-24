@@ -8,16 +8,9 @@
 
 local config = require("lvim-preview.config")
 local state = require("lvim-preview.state")
+local util = require("lvim-preview.util")
 
 local M = {}
-
--- ft name → the file extensions that map to it (for the scan filter).
-local FT_EXT = {
-    markdown = { "md", "markdown", "mkd" },
-    html = { "html", "htm" },
-    asciidoc = { "adoc", "asciidoc", "asc" },
-    svg = { "svg" },
-}
 
 -- Directory names never worth scanning.
 local SKIP_DIR = {
@@ -28,18 +21,6 @@ local SKIP_DIR = {
     ["dist"] = true,
     [".cache"] = true,
 }
-
---- The set of extensions eligible from config.filetypes.
----@return table<string, boolean>
-local function eligible_exts()
-    local set = {}
-    for _, ft in ipairs(config.filetypes or {}) do
-        for _, ext in ipairs(FT_EXT[ft] or {}) do
-            set[ext] = true
-        end
-    end
-    return set
-end
 
 --- Icon glyph for a path via lvim-icons, or the configured fallback.
 ---@param path string
@@ -59,7 +40,9 @@ end
 ---@param root string
 ---@return { label: string, path: string }[]
 local function scan(root)
-    local exts = eligible_exts()
+    -- Derived from the ONE extension→kind map, gated by config.filetypes: a file the picker
+    -- offers is by construction a file `preview_file` and the HTTP router will accept.
+    local exts = util.enabled_exts()
     local out = {}
     local ok = pcall(function()
         for name, kind in vim.fs.dir(root, { depth = 8 }) do
@@ -71,7 +54,7 @@ local function scan(root)
                     -- Dotfiles follow `serve_hidden` — the ONE switch for both sides, so what the
                     -- picker offers is always what the server will serve. A hidden segment counts
                     -- ANYWHERE in the path: the old test (`/%.`) only saw a dot AFTER a slash, so a
-                    -- top-level hidden dir (`.claude/AUDIT.md`) slipped into the list and then 404'd.
+                    -- top-level hidden dir (`.github/README.md`) slipped into the list and 404'd.
                     local hidden = name:match("^%.") ~= nil or name:match("/%.") ~= nil
                     if not (top and SKIP_DIR[top]) and (config.serve_hidden or not hidden) then
                         out[#out + 1] = { label = name, path = vim.fs.normalize(root .. "/" .. name) }

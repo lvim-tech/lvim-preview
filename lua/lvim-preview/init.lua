@@ -1,17 +1,23 @@
--- lvim-preview: a live browser preview for Markdown / HTML / AsciiDoc / SVG, served by an
+-- lvim-preview: a live browser preview for Markdown / HTML / AsciiDoc / org / SVG, served by an
 -- in-plugin pure-Lua (libuv) HTTP + WebSocket server with hot reload as you type. This module
 -- is the public API + the `:LvimPreview` command surface; the heavy lifting is split out:
 --   server/  — the uv TCP lifecycle, HTTP routing + traversal guard, the RFC 6455 handshake
 --              (pure-Lua sha1) and frame codec, and the broadcast fan-out.
---   watch    — the previewed buffer's live-update autocmds (type-driven md/adoc/svg, save-driven
---              html) + the content cache the fast HTTP path serves.
+--   watch    — the previewed buffer's live-update autocmds (type-driven md/org/svg,
+--              save-driven html) + the content cache the fast HTTP path serves.
 --   scroll   — editor->browser sync scroll.
 --   theme    — the palette-generated preview CSS, re-pushed on ColorScheme.
---   template — the served HTML shell; picker / browser — the chooser and the opener.
+--   template — the served HTML shells; picker / browser — the chooser and the opener.
+--   artifact — the PRODUCER seam: a file another plugin builds, served and reloaded on its
+--              signal (see `M.register_artifact`).
+--
+-- Two sources of truth, deliberately kept apart: a DOCUMENT is a buffer this plugin renders in
+-- the browser, an ARTIFACT is a file an external toolchain produces and this plugin only
+-- displays. Both keep the one server alive; it stops when the last of either closes.
 --
 -- One server per Neovim instance; it is torn down on `:LvimPreview stop` and on VimLeavePre.
 -- Loopback-only by default (see config.address); the browser is a passive viewer and never
--- drives the editor.
+-- drives the editor (the one opt-in exception is documented in artifact.lua).
 --
 ---@module "lvim-preview"
 
@@ -24,6 +30,7 @@ local scroll = require("lvim-preview.scroll")
 local theme = require("lvim-preview.theme")
 local browser = require("lvim-preview.browser")
 local picker = require("lvim-preview.picker")
+local artifact = require("lvim-preview.artifact")
 
 local ok_utils, utils = pcall(require, "lvim-utils.utils")
 
@@ -239,8 +246,9 @@ function M.start(file)
 end
 
 --- Stop previewing. With `file`, close only THAT document and keep the server (and every other
---- previewed document) alive; the last one closed shuts the server down. Without it, stop
---- everything: detach all documents, drop the server and the hud chip.
+--- previewed document, and every registered artifact) alive; the last thing closed shuts the
+--- server down. Without it, stop everything: detach all documents, unregister every artifact,
+--- drop the server and the hud chip.
 ---@param file string?  path of a single document to stop previewing
 ---@return nil
 function M.stop(file)
@@ -258,28 +266,68 @@ function M.stop(file)
         watch.detach(doc)
         scroll.detach(doc)
         state.docs[abs] = nil
-        if state.count() > 0 then
-            notify(("stopped %s (%d still previewing)"):format(vim.fn.fnamemodify(abs, ":t"), state.count()))
+        -- A registered artifact is reason enough to keep serving: its producer holds a handle
+        -- and expects `reload()` to keep working after the last document was closed.
+        local left = state.count() + state.artifact_count()
+        if left > 0 then
+            notify(("stopped %s (%d still served)"):format(vim.fn.fnamemodify(abs, ":t"), left))
             return
         end
-        -- that was the last document — fall through and shut the server down
+        -- that was the last thing served — fall through and shut the server down
     end
     watch.detach_all()
     scroll.detach_all()
+    artifact.close_all()
     server.stop()
     state.docs = {}
     notify("stopped")
 end
 
---- Re-open the browser: the current buffer's document when it is previewed, else the first one.
+--- Register a produced FILE for serving + live reload, and get a handle that drives its viewer.
+---
+--- This is the seam for a plugin that COMPILES something (a LaTeX build, a diagram export, a
+--- static-site generator): it owns the toolchain and the build lifecycle, lvim-preview owns the
+--- display. The producer calls `handle:status("building")` when a build starts and
+--- `handle:reload()` when it finished coherently; nothing else is needed.
+---
+--- See `lvim-preview.artifact` for the spec / handle contract and the coordinate convention of
+--- `handle:synctex`.
+---@param spec LvimPreviewArtifactSpec
+---@return LvimPreviewArtifactHandle? handle, string? err
+function M.register_artifact(spec)
+    local handle, err = artifact.register(spec)
+    if not handle then
+        notify("could not register the artifact: " .. tostring(err), vim.log.levels.ERROR)
+    end
+    return handle, err
+end
+
+--- The handle for an already-registered artifact id, or nil.
+---@param id string
+---@return LvimPreviewArtifactHandle?
+function M.artifact(id)
+    return artifact.handle(id)
+end
+
+--- Re-open the browser: the current buffer's document when it is previewed, else the first
+--- document, else the first registered artifact (a server may be serving only artifacts).
 ---@return nil
 function M.open()
-    if not server.is_running() or state.count() == 0 then
+    if not server.is_running() then
         notify("not running — start a preview first", vim.log.levels.WARN)
         return
     end
     local doc = state.doc_for_buf(vim.api.nvim_get_current_buf()) or state.list()[1]
-    browser.open(preview_url(doc), config.browser)
+    if doc then
+        browser.open(preview_url(doc), config.browser)
+        return
+    end
+    local art = state.artifact_list()[1]
+    if not art then
+        notify("nothing is being served — start a preview first", vim.log.levels.WARN)
+        return
+    end
+    browser.open(("http://%s:%d%s"):format(display_host(), state.port, art.url_path), config.browser)
 end
 
 --- The root to scan for the chooser: the live server's root while running, else the root of the
@@ -335,6 +383,20 @@ function M.status()
             doc.filetype
         )
     end
+    -- Registered artifacts are served alongside the documents and keep the server alive too.
+    local arts = state.artifact_list()
+    if #arts > 0 then
+        lines[#lines + 1] = ("artifacts: %d"):format(#arts)
+        for _, art in ipairs(arts) do
+            lines[#lines + 1] = ("  %s  →  %s  (%s, gen %d, %s)"):format(
+                art.id,
+                art.url_path,
+                art.viewer,
+                art.generation,
+                art.status.state
+            )
+        end
+    end
     vim.notify("lvim-preview\n" .. table.concat(lines, "\n"), vim.log.levels.INFO)
 end
 
@@ -389,14 +451,12 @@ end
 ---@param opts? LvimPreviewConfig
 ---@return nil
 function M.setup(opts)
-    if ok_utils and utils.merge then
-        utils.merge(config, opts or {})
-    elseif opts then
-        local merged = vim.tbl_deep_extend("force", config, opts)
-        for k, v in pairs(merged) do
-            config[k] = v
-        end
-    end
+    -- The ecosystem's merge semantics (dicts merge, LISTS replace wholesale). lvim-utils owns
+    -- the shared implementation; util.merge is its byte-for-byte fallback for a runtime without
+    -- it, so both paths behave identically — `vim.tbl_deep_extend` does NOT (it index-merges
+    -- arrays, leaving the tail of a default list behind an override).
+    local merge = (ok_utils and utils.merge) or util.merge
+    merge(config, opts or {})
 
     theme.refresh()
 

@@ -21,6 +21,10 @@ local state = require("lvim-preview.state")
 
 local M = {}
 
+-- Largest HTTP request head buffered before the terminating blank line. A browser GET head is
+-- a couple of KB at most (cookies included); past this the peer is not speaking HTTP at us.
+local MAX_HEAD = 32 * 1024
+
 ---@class LvimPreviewClientCtx
 ---@field tcp uv.uv_tcp_t   the accepted socket
 ---@field upgraded boolean  true once the WebSocket handshake completed
@@ -55,8 +59,14 @@ local function drop_client(ctx)
 end
 
 --- Handle bytes on an already-upgraded WebSocket client: decode whole frames out of the
---- rolling buffer and act on control frames. Data frames are parsed but ignored — the browser
---- is a passive viewer and must never drive the editor (safety rule).
+--- rolling buffer and act on control frames.
+---
+--- DATA frames are ignored by default — the browser is a passive viewer and must never drive the
+--- editor (safety rule). The ONE relaxation is inverse search for build artifacts, and it is
+--- deliberately narrow: a TEXT frame is handed on only when `config.artifact.allow_client_messages`
+--- is on, and the artifact module then drops anything that does not address a registered artifact
+--- whose producer supplied an `on_message` handler. Everything else — every ordinary document
+--- preview, every artifact that did not opt in, every binary frame — keeps being discarded.
 ---@param ctx LvimPreviewClientCtx
 ---@param chunk string
 local function on_ws_bytes(ctx, chunk)
@@ -73,9 +83,24 @@ local function on_ws_bytes(ctx, chunk)
             pcall(function()
                 ctx.tcp:write(websocket.pong_frame(f.payload))
             end)
+        elseif f.opcode == 0x1 and config.artifact.allow_client_messages then
+            -- Inline require: artifact.lua requires this module for broadcast, so hoisting it
+            -- would be a load-time cycle.
+            require("lvim-preview.artifact").dispatch_client_message(f.payload)
         end
-        -- 0xA pong and 0x1/0x2 data frames: ignored.
+        -- 0xA pong and 0x2 binary frames: ignored.
     end
+end
+
+--- Stop reading from a connection whose HTTP life is over. The response path writes then closes
+--- the handle itself; leaving `read_start` armed would let any further bytes re-enter the parser
+--- with the finished head still buffered and drive a second serve against a closing socket.
+---@param ctx LvimPreviewClientCtx
+local function finish_http(ctx)
+    ctx.buf = ""
+    pcall(function()
+        ctx.tcp:read_stop()
+    end)
 end
 
 --- Handle bytes on a not-yet-upgraded connection: accumulate the HTTP head, then upgrade or
@@ -86,6 +111,14 @@ local function on_http_bytes(ctx, chunk)
     ctx.buf = ctx.buf .. chunk
     -- Wait for the end of the header block. GET has no body, so this is the whole request.
     if not ctx.buf:find("\r\n\r\n", 1, true) then
+        -- A client that streams bytes and never sends the blank line must not grow this buffer
+        -- without bound. A real browser request head is far under the cap; the loopback default
+        -- makes the sender local, but a LAN bind (an explicit act) makes it remote.
+        if #ctx.buf > MAX_HEAD then
+            local tcp = ctx.tcp
+            finish_http(ctx)
+            http.refuse(tcp, "431 Request Header Fields Too Large")
+        end
         return
     end
     local request = ctx.buf
@@ -100,8 +133,12 @@ local function on_http_bytes(ctx, chunk)
         state.clients[#state.clients + 1] = ctx
         notify(("browser connected (%d client%s)"):format(#state.clients, #state.clients == 1 and "" or "s"))
     else
-        -- One-shot GET: serve and close. This ctx was never registered for broadcasts.
-        http.serve(ctx.tcp, request)
+        -- One-shot GET: every response carries `Connection: close`, so this connection is
+        -- finished the moment it is handed to the serve path. This ctx was never registered
+        -- for broadcasts.
+        local tcp = ctx.tcp
+        finish_http(ctx)
+        http.serve(tcp, request)
     end
 end
 

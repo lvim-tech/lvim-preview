@@ -23,9 +23,6 @@ end)()
 -- Every vendored asset the served page can load — the offline guarantee depends on all of them
 -- being present. Grouped by feature so a partial vendor tree points at the exact gap.
 local VENDOR = {
-    { "vendor/markdown-it/markdown-it.min.js", "markdown renderer" },
-    { "vendor/markdown-it/markdown-it-emoji.min.js", "emoji" },
-    { "vendor/markdown-it/LICENSE", "markdown-it license" },
     { "vendor/katex/katex.min.js", "KaTeX" },
     { "vendor/katex/katex.min.css", "KaTeX css" },
     { "vendor/katex/contrib/auto-render.min.js", "KaTeX auto-render" },
@@ -39,12 +36,25 @@ local VENDOR = {
     { "vendor/highlight/LICENSE", "highlight.js license" },
     { "vendor/github-markdown-css/github-markdown.css", "github-markdown css" },
     { "vendor/github-markdown-css/LICENSE", "github-markdown-css license" },
-    { "vendor/asciidoctor/asciidoctor.min.js", "AsciiDoc renderer" },
-    { "vendor/asciidoctor/asciidoctor.min.css", "AsciiDoc css" },
-    { "vendor/asciidoctor/LICENSE", "AsciiDoc license" },
+    { "vendor/pdfjs/pdf.min.mjs", "PDF artifact viewer" },
+    { "vendor/pdfjs/pdf.worker.min.mjs", "PDF artifact viewer worker" },
+    { "vendor/pdfjs/standard_fonts/LiberationSans-Regular.ttf", "PDF standard fonts" },
+    { "vendor/pdfjs/standard_fonts/LICENSE_LIBERATION", "PDF standard fonts license" },
+    { "vendor/pdfjs/LICENSE", "PDF viewer license" },
     { "client.js", "browser client" },
     { "style.css", "base stylesheet" },
     { "vendor/README", "vendor manifest" },
+}
+
+-- Assets loaded only when the feature that needs them is switched on.
+local OPTIONAL_VENDOR = {
+    {
+        "vendor/katex/contrib/mhchem.min.js",
+        "KaTeX mhchem contrib",
+        function()
+            return (config.features or {}).katex_mhchem == true
+        end,
+    },
 }
 
 --- Whether a path is a readable, non-empty file.
@@ -163,6 +173,42 @@ local function check_config(h)
     if config.serve_hidden then
         h.warn("serve_hidden is ON — dotfiles under the root (.env, .git/…) are servable")
     end
+
+    -- The render kinds actually reachable. A typo here silently makes a format unpreviewable
+    -- everywhere (picker + start + router all gate on it), so name the kinds it enables.
+    local kinds, unknown = {}, {}
+    local known = {}
+    for _, kind in pairs(util.EXT_KIND) do
+        known[kind] = true
+    end
+    for _, ft in ipairs(config.filetypes or {}) do
+        if known[ft] then
+            kinds[#kinds + 1] = ft
+        else
+            unknown[#unknown + 1] = ft
+        end
+    end
+    if #unknown > 0 then
+        h.warn(
+            ("config.filetypes lists unrenderable kind(s): %s — valid kinds are markdown, org"):format(
+                table.concat(unknown, ", ")
+            )
+        )
+    end
+    if #kinds > 0 then
+        h.ok(("previewable kinds: %s"):format(table.concat(kinds, ", ")))
+    else
+        h.error("config.filetypes enables no renderable kind — nothing can be previewed")
+    end
+
+    -- The passive-viewer rule is a documented safety property; note when it has been relaxed.
+    if config.artifact.allow_client_messages then
+        h.warn(
+            "artifact.allow_client_messages is ON — a viewer page may send messages to artifacts "
+                .. "whose producer registered an on_message handler (inverse search). Ordinary "
+                .. "previews stay passive."
+        )
+    end
 end
 
 --- Vendored-asset integrity — the offline / no-CDN guarantee.
@@ -177,6 +223,14 @@ local function check_vendor(h)
             missing[#missing + 1] = entry[1] .. " (" .. entry[2] .. ")"
         end
     end
+    for _, entry in ipairs(OPTIONAL_VENDOR) do
+        if entry[3]() then
+            total = total + 1
+            if not present(STATIC_DIR .. "/" .. entry[1]) then
+                missing[#missing + 1] = entry[1] .. " (" .. entry[2] .. ", enabled by config)"
+            end
+        end
+    end
     if #missing == 0 then
         h.ok(("all %d vendored render assets present (offline-safe, no CDN)"):format(total))
     else
@@ -187,6 +241,49 @@ local function check_vendor(h)
                 table.concat(missing, "\n  - ")
             )
         )
+    end
+end
+
+-- The two parsers that are OURS rather than vendored assets, each with a document that exercises
+-- the constructs whose failure would be invisible: a heading, a list, a table and a fenced/src
+-- block with a language.
+local OWN_PARSERS = {
+    {
+        module = "lvim-preview.markdown",
+        label = "markdown",
+        source = "# T\n\n- a\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n```lua\nlocal a = 1\n```\n",
+    },
+    {
+        module = "lvim-preview.org",
+        label = "org",
+        source = "* T\n- a\n\n| x | y |\n|---+---|\n| 1 | 2 |\n\n#+BEGIN_SRC lua\nlocal a = 1\n#+END_SRC\n",
+    },
+}
+
+--- The markdown and org paths are ours, not vendored assets, so their health check is that they
+--- LOAD and PARSE — the equivalent of "the render library is present" for every other kind. A
+--- syntax error or a broken require in either parser would otherwise only surface as a blank page
+--- in the browser.
+---@param h table
+local function check_own_parsers(h)
+    for _, p in ipairs(OWN_PARSERS) do
+        local loaded, mod = pcall(require, p.module)
+        if not loaded then
+            h.error(p.module .. " failed to load: " .. tostring(mod))
+        else
+            local rendered, result = pcall(mod.to_html, p.source)
+            if
+                rendered
+                and type(result) == "string"
+                and result:find("<h1", 1, true)
+                and result:find("<table", 1, true)
+                and result:find("language-lua", 1, true)
+            then
+                h.ok(p.label .. " parser + HTML renderer working (in-plugin Lua, nothing vendored)")
+            else
+                h.error(p.label .. " parser self-test failed: " .. tostring(result))
+            end
+        end
     end
 end
 
@@ -214,6 +311,23 @@ local function check_server(h)
     else
         h.info("server not running (start with :LvimPreview start)")
     end
+    -- Registered artifacts are served beside the documents and keep the server alive on their
+    -- own, so an "idle" server with a live artifact is not a contradiction.
+    local arts = state.artifact_list()
+    if #arts > 0 then
+        local rows = {}
+        for _, art in ipairs(arts) do
+            rows[#rows + 1] = ("  %s → %s (%s, gen %d, %s%s)"):format(
+                art.id,
+                art.url_path,
+                art.viewer,
+                art.generation,
+                art.status.state,
+                art.on_message and ", on_message" or ""
+            )
+        end
+        h.info(("%d registered artifact(s):\n%s"):format(#arts, table.concat(rows, "\n")))
+    end
 end
 
 --- Run the health report.
@@ -226,6 +340,7 @@ function M.check()
     check_browser(h)
     check_config(h)
     check_vendor(h)
+    check_own_parsers(h)
     check_server(h)
 end
 

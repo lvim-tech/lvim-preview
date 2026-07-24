@@ -106,3 +106,84 @@ body:has(> #lp-content) {
   background: transparent !important;
   color: var(--lp-fg) !important;
 }
+
+/* org: the uniorg bundle emits its own class names for a few constructs github-markdown-css
+ * knows nothing about. Keep them consistent with the rest of the prose surface. */
+.markdown-body .todo-keyword {
+  font-size: 0.8em;
+  font-weight: 700;
+  padding: 0.1em 0.4em;
+  margin-right: 0.4em;
+  border-radius: 4px;
+  background: var(--lp-code-bg);
+  color: var(--lp-heading);
+}
+.markdown-body .todo-keyword.DONE {
+  opacity: 0.6;
+}
+.markdown-body pre.src-block,
+.markdown-body div.example {
+  background-color: var(--lp-code-bg) !important;
+  padding: 1rem;
+  border-radius: 6px;
+  overflow: auto;
+}
+.markdown-body .footnote-definition {
+  font-size: 0.9em;
+  color: var(--lp-quote-fg);
+}
+
+/* ── build artifacts (registered producers) ────────────────────────────────
+ * The artifact page is not a prose document: it is a viewer for a produced file. It gets the
+ * full viewport (no 900px prose column) plus a status overlay the producer drives. */
+.lp-artifact {
+  display: block;
+  max-width: none;
+  padding: 1rem 0 3rem;
+  text-align: center;
+}
+.lp-pending {
+  color: var(--lp-quote-fg, #8b949e);
+  font-family: sans-serif;
+}
+#lp-pdf .lp-page {
+  position: relative;
+  margin: 0 auto 1rem;
+  box-shadow: 0 0 0 1px var(--lp-border, #30363d);
+  background: #fff;
+}
+#lp-pdf .lp-page canvas {
+  display: block;
+}
+/* Forward-search flash: a translucent band over the canvas at the producer's coordinates. */
+.lp-synctex {
+  position: absolute;
+  background: var(--lp-link, #58a6ff);
+  opacity: 0.35;
+  pointer-events: none;
+  border-radius: 2px;
+}
+#lp-overlay {
+  position: fixed;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 10;
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  font-family: sans-serif;
+  font-size: 0.85rem;
+  max-width: 60vw;
+  text-align: left;
+  white-space: pre-wrap;
+  color: var(--lp-bg, #0d1117);
+  background: var(--lp-link, #58a6ff);
+}
+#lp-overlay.lp-overlay-error {
+  left: 0;
+  right: 0;
+  top: 0;
+  max-width: none;
+  border-radius: 0;
+  color: #fff;
+  background: #a33;
+}

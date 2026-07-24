@@ -1,4 +1,4 @@
-*lvim-preview.txt*    Live browser preview (Markdown / HTML / AsciiDoc / SVG)
+*lvim-preview.txt*  Live browser preview (Markdown / org)
 
 ==============================================================================
 CONTENTS                                                      *lvim-preview*
@@ -7,11 +7,16 @@ CONTENTS                                                      *lvim-preview*
   2. Setup .................................. |lvim-preview-setup|
   3. Commands ............................... |lvim-preview-commands|
   4. Root modes ............................. |lvim-preview-root|
-  5. Theme .................................. |lvim-preview-theme|
-  6. Safety ................................. |lvim-preview-safety|
-  7. Vendored assets ........................ |lvim-preview-vendor|
-  8. API .................................... |lvim-preview-api|
-  9. Health ................................. |lvim-preview-health|
+  5. Markdown ............................... |lvim-preview-markdown|
+     Parser API ............................. |lvim-preview-markdown-api|
+  6. org-mode ............................... |lvim-preview-org|
+     Parser API ............................. |lvim-preview-org-api|
+  7. Build artifacts ........................ |lvim-preview-artifacts|
+  8. Theme .................................. |lvim-preview-theme|
+  9. Safety ................................. |lvim-preview-safety|
+ 10. Vendored assets ........................ |lvim-preview-vendor|
+ 11. API .................................... |lvim-preview-api|
+ 12. Health ................................. |lvim-preview-health|
 
 ==============================================================================
 1. INTRODUCTION                                         *lvim-preview-intro*
@@ -23,16 +28,24 @@ all `vim.uv`; the handshake SHA-1 (Neovim ships only sha256) is a small pure-Lua
 routine over LuaJIT's `bit`.
 
 Update model, per file kind:
-  - `markdown`, `asciidoc`, `svg` — hot-update AS YOU TYPE. Changes to the
-    previewed buffer are pushed over the WebSocket (debounced), and the browser
-    re-renders client-side. No save, no temp files.
+  - `markdown` and `org` — hot-update AS YOU TYPE. Changes to
+    the previewed buffer are pushed over the WebSocket (debounced). No save, no
+    temp files. `markdown` (|lvim-preview-markdown|) and `org`
+    (|lvim-preview-org|) are both rendered HERE, in Lua, and the frame
+    carries finished HTML. The page updates in place — it never reloads.
   - `html` — served as authored (its own CSS / JS / images resolve against the
     same root); a save pushes a reload. Save-driven by design — a half-typed tag
     would thrash the DOM.
 
-All render assets (a Markdown renderer, asciidoctor.js, KaTeX, Mermaid, a code
-highlighter) are vendored locally: the page makes NO external / CDN request and
-works fully offline. See |lvim-preview-vendor|.
+Beside DOCUMENTS (buffers this plugin renders), the server also displays
+ARTIFACTS: files another plugin PRODUCES, live-reloaded on that producer's
+signal. See |lvim-preview-artifacts|.
+
+All render assets (KaTeX, Mermaid, a code highlighter, pdf.js)
+are vendored locally: the page makes NO external / CDN request and works fully
+offline. See |lvim-preview-vendor|. Markdown and org are not among them — both
+are parsed and rendered by our own Lua (|lvim-preview-markdown|,
+|lvim-preview-org|).
 
 ==============================================================================
 2. SETUP                                                *lvim-preview-setup*
@@ -49,27 +62,53 @@ its default:
       root = "project",       -- "project" | "file" | "/explicit/path"
       serve_hidden = true,    -- serve dotfiles under the root (on)
       debounce = 100,         -- ms idle before a type-driven push
-      sync_scroll = true,     -- editor->browser scroll sync (md/adoc)
+      sync_scroll = true,     -- editor->browser scroll sync (md/adoc/org)
       theme = "lvim",         -- "lvim" | "light" | "dark" | "auto"
-      filetypes = { "markdown", "html", "asciidoc", "svg" },
+      filetypes = { "markdown", "org" },
       features = {
           katex = true,       -- $...$ / $$...$$ math (KaTeX)
+          katex_macros = {},  -- name -> expansion, e.g. { ["\\RR"] = "\\mathbb{R}" }
+          katex_mhchem = false, -- vendored mhchem contrib (\ce{H2O})
           mermaid = true,     -- ```mermaid fences -> diagrams
           highlight = true,   -- fenced code highlighting (highlight.js)
-          emoji = true,       -- :shortcode: emoji
+          markdown = {
+              typographer = true,  -- (c) -> ©, -- -> –, ... -> …, curly quotes
+              linkify = true,      -- bare https:// / www. / email -> links
+              task_lists = false,  -- `- [ ]` -> a disabled checkbox item
+          },
+          org = {
+              todo_keywords = { "TODO", "DONE" },
+          },
+      },
+      artifact = {            -- see |lvim-preview-artifacts|
+          prefix = "/@lvim-artifact/",
+          allow_client_messages = false,
+          watch_debounce = 100,
+          stall_note_ms = 10000,
+          pdf = {
+              restore_position = true,
+              highlight_ms = 1200,
+          },
       },
       hud_chip = true,        -- lvim-hud serving chip while running
       notify = true,          -- start/stop/port/client notifications
       icons = {               -- Nerd Font single-width glyphs
-          server = "",
+          server = "",
           file = "󰈙",
-          pick = "",
+          pick = "",
       },
   })
 <
 `browser` may be a command string (split on whitespace) or an argv list, e.g.
 `{ "firefox", "--new-window" }` — always spawned as a list via `vim.system`,
 never a shell string.
+
+`filetypes` lists the render KINDS that are enabled, and it is a real gate:
+removing one makes every file that maps to it non-previewable everywhere at
+once — the picker stops offering it, `:LvimPreview start` refuses it, and the
+server stops wrapping it in the shell. The extension -> kind map itself lives in
+`lvim-preview.util` (EXT_KIND): md/markdown/mkd and org. Nothing else is
+previewable.
 
 ==============================================================================
 3. COMMANDS                                          *lvim-preview-commands*
@@ -78,10 +117,14 @@ never a shell string.
 :LvimPreview start [file]   Start the server and preview `file` (or the current
                             buffer when omitted); opens the browser when
                             `auto_open` is on.
-:LvimPreview stop           Stop the server; close all clients; clear the chip.
-:LvimPreview open           Re-open the browser at the current preview URL.
-:LvimPreview status         Report address / port / root / previewed file /
-                            client count / theme.
+:LvimPreview stop [file]    Without a path: stop everything — detach every
+                            document, unregister every artifact, close the
+                            server. With a path: stop only that document; the
+                            server stays up while anything else is served.
+:LvimPreview open           Re-open the browser at the current preview URL (a
+                            previewed document, else the first artifact).
+:LvimPreview status         Report address / port / root / previewed files /
+                            registered artifacts / client count / theme.
 :LvimPreview pick           Choose a previewable file under the root through the
                             lvim-ui select picker (lvim-icons per row).
 
@@ -98,10 +141,245 @@ never a shell string.
   - a path     a fixed absolute servable root.
 
 The previewed file must live under the resolved root; otherwise `start` reports
-it (switch to "file" or an enclosing path).
+it (switch to "file" or an enclosing path). ARTIFACTS are exempt: they are
+served from their own directory under a reserved URL prefix, so build output can
+live anywhere on disk (|lvim-preview-artifacts|).
 
 ==============================================================================
-5. THEME                                                *lvim-preview-theme*
+5. MARKDOWN                                          *lvim-preview-markdown*
+
+`.md` files are parsed and rendered to HTML by our own Lua, running in Neovim.
+There is no vendored Markdown library and the page loads no Markdown JavaScript
+at all. The first paint and every live update go through the SAME server-side
+render, so they cannot disagree.
+
+CONFORMANCE
+
+644 of the 652 CommonMark 0.31.2 conformance examples match byte-for-byte
+(98.8%). Of the other 8, seven render identically in a real browser: six differ
+only in whether a named character reference is written out (`&ouml;`) or decoded
+(`ö`) — which the browser resolves either way — and the URLs they produce
+resolve to the same absolute URL. The single genuine gap is Unicode SPECIAL-case
+folding in a link reference label (`[ẞ]` matching a `[SS]:` definition); simple
+case folding, Latin-1 / Greek / Cyrillic included, does work.
+
+EXTENSIONS
+
+GFM pipe tables (alignment, `\|` escapes, ragged rows padded), strikethrough
+(`~~text~~` -> `<s>`), raw HTML pass-through, typographic replacement and smart
+quotes, and autolinking of bare URLs. GFM task lists are available but OFF by
+default (`features.markdown.task_lists`): switching them on changes `- [ ] todo`
+from literal text into a rendered checkbox.
+
+Autolinking requires an explicit scheme, a `www.` prefix, or an email address —
+deliberately narrower than a fuzzy TLD match, which turns `setup.py` and
+`CLAUDE.md` into links.
+
+NOT IMPLEMENTED: `:shortcode:` emoji.
+
+Malformed input is preserved, never dropped: an unclosed fence runs to the end
+of its container with its body intact, a half-typed table keeps its cells, a
+reference definition that does not parse stays paragraph text, and an unbalanced
+`*` stays the literal character.
+
+PARSER API                                       *lvim-preview-markdown-api*
+
+The parser is a self-contained module with a documented public API over a
+document TREE. It knows nothing about HTML, nothing about this plugin, and uses
+no vim.api / vim.fn — it is written to be lifted out into a shared home when a
+second consumer needs it.
+>lua
+  local md = require("lvim-preview.markdown")
+
+  local doc  = md.parse(text, { tables = true, typographer = true })
+  local html = md.render(doc, { source_lines = true })
+  local both = md.to_html(text, opts)   -- parse + render in one step
+  local str  = md.to_text(node.inlines) -- inline nodes -> plain text
+<
+`text` is a string or a list of lines. Parse options: `tables`, `strike`,
+`typographer`, `linkify`, `task_lists`. Render options: `source_lines`
+(data-source-line anchors, default true), `heading_ids`, `heading_shift`,
+`breaks`, `xhtml`.
+
+Every node carries `type`, `line` and `end_line` — absolute 1-based lines into
+the source, which is what makes the scroll anchors exact. Block node types:
+document, paragraph, heading, code_block, html_block, thematic_break,
+block_quote, list, item, table. Inline node types: text, raw, code, emph,
+strong, strike, link, image, softbreak, linebreak. The full field list per type
+is in the module header of `lua/lvim-preview/markdown/init.lua`.
+
+Parsing never raises and never drops input, so a caller needs no pcall for
+malformed documents.
+
+==============================================================================
+6. ORG-MODE                                               *lvim-preview-org*
+
+`.org` files are parsed and rendered to HTML by OUR OWN LUA, running in Neovim.
+There is no vendored org library, the served page loads no org JavaScript, and
+this plugin therefore ships no org licence of any kind. The result goes into the
+same prose page Markdown uses — the same theme, the same highlight.js code
+blocks, the same KaTeX pass, and `data-source-line` anchors so sync scrolling is
+exact rather than proportional. A live update as you type sends the rendered
+HTML over the same WebSocket; the page never reloads.
+
+RENDERS:
+  - headings: TODO keywords (features.org.todo_keywords, with an optional "|"
+    separating the DONE states), priority cookies [#A], tags, and per-headline
+    :PROPERTIES: (lifted onto the node and shown in a collapsible drawer)
+  - #+TITLE: / #+SUBTITLE: / #+AUTHOR: / #+DATE: as a page header
+  - plain, ordered and description lists, nested to any depth, with
+    continuation paragraphs and CHECKBOXES (- [ ], - [X], - [-])
+  - tables with header separation; a row with the wrong number of cells is
+    padded to the widest row, never dropped
+  - links, images and <<targets>>; `[[file:./img.png]]` resolves against the
+    served root
+  - inline markup: *bold*, /italic/, _underline_, +strike+, =verbatim=, ~code~,
+    braced ^{sup} and _{sub}, and hard `\\` line breaks
+  - #+BEGIN_SRC (highlighted per language; `#+BEGIN_SRC mermaid` becomes a
+    diagram), QUOTE, EXAMPLE, VERSE, CENTER, EXPORT html, fixed-width blocks
+  - footnote definitions and references (numbered, with back-links)
+  - drawers (collapsible), timestamps, horizontal rules
+  - LaTeX fragments ($...$, $$...$$, \(...\), \[...\]) and LaTeX environments
+    (\begin{align}...\end{align}) — both handed to KaTeX with their delimiters
+
+DOES NOT RENDER — deliberately: this is a READER, not an org exporter:
+  - Babel: no #+BEGIN_SRC :results execution of any kind
+  - #+INCLUDE
+  - macros ({{{name}}})
+  - #+OPTIONS export switches
+  - #+CAPTION: / #+ATTR_HTML: attachment (the keywords are parsed and kept in
+    the tree, but nothing is rendered from them)
+  - UNBRACED sub/superscripts: `a_{b}` renders, a bare `a_b` does not — there
+    is no way to tell a subscript from a snake_case word in prose
+  - agenda, clocking and column-view semantics
+  - an ABSOLUTE `[[file:/abs/path]]` link (only paths under the servable root
+    can resolve)
+  - #+BEGIN_EXPORT latex is shown as text rather than injected
+
+MALFORMED INPUT IS PRESERVED, NEVER DROPPED. An unclosed #+BEGIN_SRC or drawer
+ends at its section boundary with its body intact; an unbalanced emphasis marker
+stays literal text; an unrecognised #+ line is kept; a half-typed table keeps
+rendering. A previewer that loses a paragraph because you are mid-edit is worse
+than one that shows something slightly odd.
+
+PARSER API                                            *lvim-preview-org-api*
+
+The parser is a self-contained module with a documented public API over a
+document TREE. It knows nothing about HTML, nothing about this plugin, and uses
+no vim.api / vim.fn — it is written to be lifted out into a shared home when a
+second consumer (an in-buffer decorator, an editing/agenda plugin) needs it.
+>lua
+  local org = require("lvim-preview.org")
+
+  local doc  = org.parse(text, { todo_keywords = { "TODO", "|", "DONE" } })
+  local html = org.render(doc, { source_lines = true })
+  local both = org.to_html(text, opts)   -- parse + render in one step
+  local str  = org.to_text(node.title)   -- inline nodes -> plain text
+<
+`text` is a string or a list of lines. Parse options: `todo_keywords`. Render
+options: `source_lines` (data-source-line anchors, default true), `title_block`,
+`footnotes`, `heading_shift`.
+
+Every node carries `type`, `line` and `end_line` — absolute 1-based lines into
+the source, which is what makes the scroll anchors exact. Block node types:
+document, headline, paragraph, list, list_item, table, block, fixed_width,
+horizontal_rule, keyword, comment, drawer, property_drawer, latex_environment,
+footnote_definition, unknown. Inline node types: text, bold, italic, underline,
+strike, superscript, subscript, code, verbatim, link, latex_fragment, timestamp,
+footnote_reference, target, line_break. The full field list per type is in the
+module header of `lua/lvim-preview/org/init.lua`.
+
+Parsing never raises and never drops input, so a caller needs no pcall for
+malformed documents.
+
+==============================================================================
+7. BUILD ARTIFACTS                                  *lvim-preview-artifacts*
+
+                                            *lvim-preview-register_artifact*
+A plugin that COMPILES something registers the file it produces; lvim-preview
+serves it and refreshes the viewer when the producer says the build finished.
+The producer owns the toolchain, the build lifecycle and any diagnostics;
+lvim-preview compiles nothing and knows nothing about the format. This is a
+general capability, not a LaTeX special case.
+>lua
+  local handle = require("lvim-preview").register_artifact({
+      id = "tex:" .. main_tex,  -- stable, free-form; the registry key
+      path = "/abs/path/build/main.pdf",  -- need not exist yet
+      viewer = "pdf",           -- optional: inferred from the extension
+      title = "main.pdf",       -- optional: defaults to the basename
+      watch = false,            -- optional: true = a uv fs watcher reloads
+      on_message = nil,         -- optional: inbound viewer messages
+  })
+<
+Handle: >lua
+  handle:url()                  -- the page URL to open
+  handle:reload()               -- the file is new and coherent -> refetch
+  handle:status(state, msg?)    -- "idle"|"building"|"ok"|"error" overlay
+  handle:synctex(target)        -- { page, x, y, width?, height? }
+  handle:close()                -- unregister
+<
+`reload`, `status` and `synctex` return false when the artifact is gone or the
+server is not running; they never raise. `register_artifact` returns
+`handle, nil` or `nil, err`. `require("lvim-preview").artifact(id)` re-acquires
+a handle for an id already registered.
+
+URL AND LIFECYCLE
+  - Artifacts are served under `artifact.prefix` (default "/@lvim-artifact/"),
+    a reserved namespace that can never collide with a document path. The
+    produced file's OWN DIRECTORY is the confined serve root, guarded by the
+    same segment stack as |lvim-preview-root|, so build output can live
+    anywhere and nothing above it is reachable.
+  - The producer's `id` is free-form; the URL carries a short opaque slug
+    assigned at registration. Re-registering the same id keeps that slug, so
+    tabs opened earlier stay valid across a producer restart.
+  - `register_artifact` starts the server when it is not running. An artifact
+    keeps it alive on its own: closing the last previewed document does not
+    pull the page out from under a build.
+
+WHY reload() AND NOT A WATCHER BY DEFAULT
+  Only the producer knows a build finished COHERENTLY. A half-written PDF must
+  never be fetched, and tools differ — some write in place, some write to a
+  temporary name and rename over the target. `watch = true` exists for
+  producers with no completion signal; it watches the file's DIRECTORY (so a
+  write-then-rename still fires) and debounces by `artifact.watch_debounce`.
+
+VIEWERS
+  pdf   A vendored pdf.js page. It restores your page and scroll offset after
+        every rebuild (`artifact.pdf.restore_position`) — the browser's own PDF
+        viewer resets to page 1 and offers no hook for forward search. `+`, `-`
+        and `0` zoom.
+  html  The produced page as authored, with the reload client injected.
+  raw   The bytes with their MIME type and no wrapper. Addressable and
+        re-fetchable, but with no client on the page nothing listens for reload
+        frames.
+  A file registered before its first build serves a "not produced yet" page
+  that carries the client, so the first reload turns it into the real viewer.
+
+STATUS OVERLAY
+  status("building") raises a corner chip over the LAST GOOD render and
+  refetches nothing, so a rebuild never blanks or flickers the page; after
+  `artifact.stall_note_ms` the chip says so, which makes a wedged producer
+  visible. status("error", msg) raises a strip carrying the producer's message
+  while the old render stays readable. status("ok") clears it. Full diagnostics
+  belong in the editor, not on the page.
+
+SYNCTEX COORDINATES
+  `page` is 1-based. `x`, `y`, `width` and `height` are PDF POINTS measured from
+  the TOP-LEFT of that page — exactly what `synctex view` reports in its x / y
+  fields. The producer resolves the target; lvim-preview only scrolls to it and
+  flashes a rect for `artifact.pdf.highlight_ms`.
+
+INVERSE SEARCH
+  A ctrl-click in the pdf viewer sends
+  `{ type = "synctex_edit", path, page, x, y }` to the artifact's `on_message`
+  handler, on the main thread. It requires BOTH
+  `artifact.allow_client_messages = true` AND that artifact having registered an
+  `on_message` handler. Everything else the browser might send keeps being
+  discarded, so the passive-viewer rule (|lvim-preview-safety|) still holds for
+  every ordinary preview.
+
+==============================================================================
+8. THEME                                                *lvim-preview-theme*
 
 theme = "lvim" (default) generates the preview CSS variables from the live
 lvim-utils palette and re-pushes them to every open tab on `ColorScheme` and on
@@ -111,46 +389,78 @@ prefers-color-scheme decide. Code-block token colours use the highlight.js
 github light/dark theme.
 
 ==============================================================================
-6. SAFETY                                               *lvim-preview-safety*
+9. SAFETY                                               *lvim-preview-safety*
 
   - Loopback only by default (127.0.0.1). Binding any other address exposes the
     preview AND every file under the root to the LAN with NO authentication — an
     explicit config act; :checkhealth warns on a non-loopback bind.
   - Path traversal is guarded: each request path is resolved on a segment stack
-    that can never escape the root; no directory listings; dotfiles are hidden
-    unless serve_hidden = false.
+    that can never escape the root (or, for an artifact, its own directory); no
+    directory listings; dotfiles follow serve_hidden.
+  - An HTTP connection is one-shot: `Connection: close`, and reading stops the
+    moment the request is handed to the serve path, so a pipelined second
+    request can never drive a second response on a closing socket. A request
+    head that never terminates is capped at 32 KB and refused with 431.
   - The browser never drives the editor: inbound WebSocket traffic is limited to
-    ping / pong / close. The page is a passive viewer.
-  - Teardown is complete on stop / VimLeavePre — every client handle and the
-    listener are closed, so no port is orphaned.
+    ping / pong / close. The page is a passive viewer. The single exception is
+    inverse search on a build artifact, gated twice — see
+    |lvim-preview-artifacts|.
+  - Teardown is complete on stop / VimLeavePre — every client handle, every
+    debounce timer, every artifact watcher and the listener are closed, so no
+    port is orphaned and no libuv handle leaks across preview/stop cycles.
 
 ==============================================================================
-7. VENDORED ASSETS                                      *lvim-preview-vendor*
+10. VENDORED ASSETS                                      *lvim-preview-vendor*
 
 Every browser render asset is pinned and served locally from `static/vendor/`
-(markdown-it, markdown-it-emoji, KaTeX with its fonts, Mermaid, highlight.js,
-github-markdown-css, asciidoctor.js), each with its upstream LICENSE beside it.
+(KaTeX with its fonts and the mhchem contrib, Mermaid, highlight.js,
+github-markdown-css, and pdf.js with the 14 standard PDF fonts),
+each with its upstream LICENSE beside it.
 `static/vendor/README` lists the version / license / source of each. The served
 page never points at a CDN. :checkhealth verifies every asset is present.
 
+All of them are permissively licensed (MIT / BSD-3-Clause / Apache-2.0), which
+matches this plugin's own BSD-3-Clause; adding a copyleft asset would be an
+explicit decision, not a vendoring commit. There is deliberately NO Markdown or
+org renderer here: see |lvim-preview-markdown| and |lvim-preview-org|. pdf.js is
+vendored without its `cmaps/` (CJK encodings) and `wasm/` (JPEG-2000 decoders)
+directories.
+
 ==============================================================================
-8. API                                                     *lvim-preview-api*
+11. API                                                    *lvim-preview-api*
 
 require("lvim-preview").setup(opts)     Configure / start (idempotent).
 require("lvim-preview").start(file?)    Preview `file` or the current buffer.
 require("lvim-preview").preview_file(p) Preview an explicit path.
-require("lvim-preview").stop()          Stop the server.
+require("lvim-preview").stop(file?)     Stop everything, or one document.
 require("lvim-preview").open()          Re-open the browser tab.
 require("lvim-preview").pick()          Open the file chooser.
 require("lvim-preview").status()        Notify the current status.
 require("lvim-preview").is_running()    -> boolean
+require("lvim-preview").is_previewing(b?)  -> boolean, for a statusline
+require("lvim-preview").status_text(b?) -> string ("" when not previewed)
+require("lvim-preview").hud_segment(o?) -> an lvim-hud chrome segment
+require("lvim-preview").register_artifact(spec)  -> handle?, err?
+require("lvim-preview").artifact(id)    -> handle? for a registered id
+require("lvim-preview.markdown").parse(text, opts)   -> MdDocument
+require("lvim-preview.markdown").render(doc, opts)   -> html
+require("lvim-preview.markdown").to_html(text, opts) -> html
+require("lvim-preview.org").parse(text, opts)    -> OrgDocument
+require("lvim-preview.org").render(doc, opts)    -> html
+require("lvim-preview.org").to_html(text, opts)  -> html
+
+See |lvim-preview-artifacts| for the artifact spec and handle contract, and
+|lvim-preview-markdown-api| / |lvim-preview-org-api| for the parser trees.
 
 ==============================================================================
-9. HEALTH                                               *lvim-preview-health*
+12. HEALTH                                              *lvim-preview-health*
 
 :checkhealth lvim-preview checks the Neovim / LuaJIT `bit` runtime, the optional
 ecosystem integrations (lvim-utils / lvim-ui / lvim-hud / lvim-icons), the
-browser opener, config validity, the SECURITY posture of the bind address, and
-the integrity of every vendored render asset (the offline guarantee).
+browser opener, config validity (including which render kinds `filetypes`
+actually enables), the SECURITY posture of the bind address and of
+`artifact.allow_client_messages`, the integrity of every vendored render asset
+(the offline guarantee), a self-test of the in-plugin Markdown and org parsers
+and HTML renderers, and the live server plus its registered artifacts.
 
 vim:tw=78:ts=8:ft=help:norl:

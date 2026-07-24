@@ -12,11 +12,33 @@
 ---@field file   string  fallback document glyph (lvim-icons wins per file when present)
 ---@field pick   string  the picker title glyph
 
+---@class LvimPreviewMarkdownFeature
+---@field typographer boolean  `(c)` → ©, `--` → –, `...` → …, straight quotes → curly
+---@field linkify     boolean  turn bare `https://…`, `www.…` and email addresses into links
+---@field task_lists  boolean  render `- [ ]` / `- [x]` as a disabled checkbox item
+
+---@class LvimPreviewOrgFeature
+---@field todo_keywords string[]  Keyword set the org parser treats as TODO states.
+
 ---@class LvimPreviewFeatures
----@field katex     boolean  render `$…$` / `$$…$$` math with KaTeX
----@field mermaid   boolean  render ```mermaid fences as diagrams
----@field highlight boolean  syntax-highlight fenced code blocks (highlight.js)
----@field emoji     boolean  render `:shortcode:` emoji (markdown-it-emoji)
+---@field katex        boolean  render `$…$` / `$$…$$` math with KaTeX
+---@field katex_macros table<string, string>  name → expansion, passed to KaTeX auto-render
+---@field katex_mhchem boolean  load the vendored mhchem contrib (`\ce{…}` chemistry)
+---@field mermaid      boolean  render ```mermaid fences as diagrams
+---@field highlight    boolean  syntax-highlight fenced code blocks (highlight.js)
+---@field markdown     LvimPreviewMarkdownFeature  markdown renderer options
+---@field org          LvimPreviewOrgFeature  org renderer options
+
+---@class LvimPreviewArtifactPdf
+---@field restore_position boolean  keep page / scroll / zoom across a producer reload
+---@field highlight_ms     integer  ms a forward-search highlight rect stays visible
+
+---@class LvimPreviewArtifactConfig
+---@field prefix                string   reserved URL namespace for registered artifacts
+---@field allow_client_messages boolean  master gate for INBOUND viewer messages (inverse search)
+---@field watch_debounce        integer  ms, only for artifacts registered with `watch = true`
+---@field stall_note_ms         integer  ms before the viewer notes a build is still running
+---@field pdf                   LvimPreviewArtifactPdf  pdf.js viewer behaviour
 
 ---@class LvimPreviewConfig
 ---@field address    string          Bind address. Non-loopback (LAN) is an explicit act — health warns.
@@ -28,11 +50,13 @@
 ---@field serve_hidden boolean       Serve dotfiles under the root (ON — a project's docs often live in
 ---                                   a dot-dir; the server is loopback-only, and `.env`/`.git` become
 ---                                   readable by anything on this machine, so set false to lock it down).
----@field debounce   integer         ms of idle before a type-driven push (md/adoc/svg).
----@field sync_scroll boolean        Editor→browser scroll sync (md/adoc).
+---@field debounce   integer         ms of idle before a type-driven push (md/org/svg).
+---@field sync_scroll boolean        Editor→browser scroll sync (md/org).
 ---@field theme      "lvim"|"light"|"dark"|"auto"  Preview theme; "lvim" tracks the live palette.
----@field filetypes  string[]        Filetypes eligible for preview.
+---@field filetypes  string[]        Render kinds enabled for preview — the gate for the picker,
+---                                   `preview_file` AND the HTTP router (see util.EXT_KIND).
 ---@field features   LvimPreviewFeatures  Client-side render toggles.
+---@field artifact   LvimPreviewArtifactConfig  Producer-registered build artifacts (see artifact.lua).
 ---@field hud_chip   boolean         Show the lvim-hud serving chip while the server runs.
 ---@field notify     boolean         Emit start/stop/port/client vim.notify events.
 ---@field icons      LvimPreviewIcons Nerd Font single-width glyphs.
@@ -59,12 +83,50 @@ return {
     debounce = 100,
     sync_scroll = true,
     theme = "lvim",
-    filetypes = { "markdown", "html", "asciidoc", "svg" },
+    -- The render KINDS (not extensions) this plugin will preview. Removing one makes every file
+    -- that maps to it non-previewable everywhere at once — the picker stops offering it,
+    -- `:LvimPreview start` refuses it, and the HTTP router stops wrapping it in the shell.
+    -- The extension→kind map itself is util.EXT_KIND.
+    filetypes = { "markdown", "org" },
     features = {
         katex = true,
+        -- name → expansion, handed to KaTeX auto-render, e.g. { ["\\RR"] = "\\mathbb{R}" }.
+        katex_macros = {},
+        -- Chemistry (`\ce{H2O}`) via the vendored KaTeX mhchem contrib. Off by default: it is
+        -- another ~60 KB on every page and only a minority of documents want it.
+        katex_mhchem = false,
         mermaid = true,
         highlight = true,
-        emoji = true,
+        markdown = {
+            -- The two passes that are NOT CommonMark: both were on in the renderer this one
+            -- replaced, so both default on. Turn them off to see exactly what you typed.
+            typographer = true,
+            linkify = true,
+            -- GFM task lists. Off by default because the previous renderer did not have them:
+            -- switching it on changes `- [ ] todo` from literal text into a rendered checkbox.
+            task_lists = false,
+        },
+        org = {
+            -- The one thing org readers really customise; everything else rides the flags above.
+            todo_keywords = { "TODO", "DONE" },
+        },
+    },
+    -- Build ARTIFACTS: a file some OTHER plugin produced (a compiled PDF, a generated HTML)
+    -- that this server displays and live-reloads on the producer's signal. See artifact.lua —
+    -- nothing here is used until a producer calls `register_artifact`.
+    artifact = {
+        -- Reserved URL namespace; never collides with a document path under the servable root.
+        prefix = "/@lvim-artifact/",
+        -- MASTER gate for inbound viewer→editor messages (inverse search). OFF: the page stays
+        -- the passive viewer it is for every ordinary preview. Even ON, a message is delivered
+        -- only to an artifact whose producer supplied an `on_message` handler.
+        allow_client_messages = false,
+        watch_debounce = 100,
+        stall_note_ms = 10000,
+        pdf = {
+            restore_position = true,
+            highlight_ms = 1200,
+        },
     },
     hud_chip = true,
     notify = true,

@@ -12,22 +12,51 @@ from the source below and update this manifest.
 
 asset             | version  | license      | source
 ------------------|----------|--------------|---------------------------------------------------------
-markdown-it       | 14.1.0   | MIT          | npm markdown-it            → dist/markdown-it.min.js
-markdown-it-emoji | 3.0.0    | MIT          | npm markdown-it-emoji      → dist/markdown-it-emoji.min.js
-katex             | 0.16.11  | MIT          | npm katex                  → dist/katex.min.{js,css}, dist/contrib/auto-render.min.js, dist/fonts/*.woff2
+katex             | 0.16.11  | MIT          | npm katex                  → dist/katex.min.{js,css}, dist/contrib/{auto-render,mhchem}.min.js, dist/fonts/*.woff2
 mermaid           | 11.4.1   | MIT          | npm mermaid                → dist/mermaid.min.js
 highlight.js      | 11.11.1  | BSD-3-Clause | cdnjs highlight.js 11.11.1 → highlight.min.js; npm highlight.js → styles/github{,-dark}.min.css
 github-markdown-css | 5.8.1  | MIT          | npm github-markdown-css    → github-markdown.css
-asciidoctor.js    | 3.0.4    | MIT          | npm @asciidoctor/core      → dist/browser/asciidoctor.js
+pdf.js            | 5.6.205  | Apache-2.0   | npm pdfjs-dist             → build/pdf.min.mjs, build/pdf.worker.min.mjs, standard_fonts/
+
+Every asset above is permissively licensed (MIT / BSD-3-Clause / Apache-2.0), which matches this
+plugin's own BSD-3-Clause. Nothing here is copyleft, and adding something that is needs an
+explicit decision, not a vendoring commit.
+
+There is NO markdown or org renderer in this directory. Both are parsed and rendered to HTML by
+our own Lua, in `lua/lvim-preview/markdown/` and `lua/lvim-preview/org/` — neither is a browser
+asset at all, and that is why this plugin ships no markdown or org licence.
 
 Notes
 -----
 * katex: only the .woff2 fonts are vendored (the modern format KaTeX lists
   first); ancient-browser .woff/.ttf fallbacks are omitted. katex.min.css
   references the fonts by the relative path fonts/… , which resolves under the
-  served /@lvim-preview/vendor/katex/ prefix.
+  served /@lvim-preview/vendor/katex/ prefix. The mhchem contrib is loaded only
+  when features.katex_mhchem = true.
 * highlight.js: the browser bundle is the common-languages cdnjs build; the two
   github themes are toggled by prefers-color-scheme when the preview theme is a
   static one, and are overridden by the palette when theme = "lvim".
-* line numbering for sync-scroll (data-source-line anchors) is done in
-  ../client.js through markdown-it's public token API — no separate plugin.
+* line numbering for sync-scroll (data-source-line anchors) is emitted by our own
+  markdown and org HTML renderers, which know every node's source line exactly.
+* pdf.js is ESM-only upstream (.mjs). It is bootstrapped by an inline
+  `type="module"` block in template.pdf_shell, which is OUR code — no upstream
+  file is modified. `cmaps/` (CJK encodings) and `wasm/` (the JPEG-2000 and
+  OpenJPEG image decoders) are NOT vendored: they are ~2.6 MB and no TeX or
+  export toolchain output needs them. A PDF that does will render its text but
+  drop those glyphs/images. `standard_fonts/` IS vendored (the 14 standard PDF
+  fonts) because pdf.js would otherwise fetch them from a CDN.
+* org has no entry here BY DESIGN. The only two JS org parsers with usable
+  coverage are GPL-3.0-or-later (uniorg) or too weak to accept (orgajs, MIT,
+  drops TODO keywords and emits <td> for table headers), so the org path was
+  written in Lua instead and runs in Neovim: `lua/lvim-preview/org/`. The page
+  receives finished HTML and loads no org library at all.
+* markdown had a vendored renderer (markdown-it 14.1.0 + markdown-it-emoji 3.0.0)
+  until it was replaced by our own Lua CommonMark parser in
+  `lua/lvim-preview/markdown/`. The replacement was made on measurement, not
+  preference: 644/652 of the CommonMark 0.31.2 conformance examples byte-exact
+  (the 8 others differ only in whether a character reference is written out or
+  decoded, which a browser resolves identically), and byte-identical HTML to
+  markdown-it on 80 of 83 real markdown files in this ecosystem — the other 3
+  differing only because markdown-it's fuzzy autolinker turned `setup.py`,
+  `noxfile.py`, `manage.py` and `CLAUDE.md` into `http://` links. Emoji
+  shortcodes (`:tada:`) went with markdown-it-emoji and are not implemented.

@@ -1,9 +1,9 @@
--- lvim-preview.scroll: editor->browser sync scroll (markdown + asciidoc). A WinScrolled /
+-- lvim-preview.scroll: editor->browser sync scroll (markdown, org). A WinScrolled /
 -- CursorMoved on a previewed buffer broadcasts a `scroll` frame carrying the top visible line and
 -- the buffer's line count; the client jumps to the nearest block with a matching `data-source-line`
--- (markdown), or falls back to a proportional scroll (asciidoc, whose vendored converter does not
--- emit per-line anchors). One-way by design — the browser never moves the editor (safety rule);
--- two-way is a findings.md OPEN idea.
+-- (markdown and org both stamp them), or falls back to a proportional scroll (asciidoc, whose
+-- vendored converter does not emit per-line anchors). One-way by design — the browser never moves
+-- the editor (safety rule); two-way is a findings.md OPEN idea.
 --
 -- PER DOCUMENT: every previewed file owns its augroup and its last-line marker, so several
 -- documents scroll-sync at once and each frame is addressed by that document's `url_path`.
@@ -45,13 +45,18 @@ local function send_scroll(doc)
     })
 end
 
+-- Kinds whose rendered page can be scrolled to a source line (anchors or a proportional
+-- fallback). html and svg have no line mapping at all.
+---@type table<string, boolean>
+local SYNCABLE = { markdown = true, org = true }
+
 --- Install the sync-scroll autocmds for one document. No-op when sync_scroll is off or the kind is
 --- html/svg (no source-line mapping to scroll to). Idempotent per document.
 ---@param doc LvimPreviewDoc
 ---@return nil
 function M.attach(doc)
     M.detach(doc)
-    if not config.sync_scroll or (doc.filetype ~= "markdown" and doc.filetype ~= "asciidoc") then
+    if not config.sync_scroll or not SYNCABLE[doc.filetype] then
         return
     end
     seq = seq + 1
