@@ -266,6 +266,14 @@ local function serve_doc(client, urlpath)
     -- also keeps this fast-path safe (no vim.fs call inside the libuv callback).
     local doc = state.doc_for_url(urlpath)
 
+    -- `serve = "documents"` is the allowlist mode: ONLY a previewed document or a sub-resource one of
+    -- them references is servable; anything else under the root is 404, so exposing the port never
+    -- exposes the whole tree. "root" mode (default) serves any previewable/plain file under the root.
+    local docs_only = config.serve == "documents"
+    if docs_only and not doc and not state.asset_allowed(urlpath) then
+        return not_found(client)
+    end
+
     -- `serve_hidden` is the SINGLE switch for dotfiles: it governs what the server will serve AND
     -- what the picker offers, so the two can never disagree (a file you can pick is a file you can
     -- open). `..` escapes stay blocked either way.
@@ -276,19 +284,31 @@ local function serve_doc(client, urlpath)
 
     local kind = util.kind_for(path)
 
+    -- Wrap a document in the shell; in documents mode also harvest the sub-resources it references
+    -- (from the rendered BODY — the page embeds it as escaped JSON) so the browser's follow-up image
+    -- requests pass the allowlist above.
+    local function serve_document(html, body)
+        if docs_only and doc and body then
+            doc.assets = template.local_refs(body, urlpath)
+        end
+        respond(client, "200 OK", "text/html; charset=utf-8", html)
+    end
+
     -- A previewed markdown/org buffer: wrap its CACHED (possibly unsaved) content in the
     -- shell so first paint already reflects the editor; WS `update` frames then keep it live.
     if doc and kind and doc.content ~= nil then
-        return respond(client, "200 OK", "text/html; charset=utf-8", template.shell(kind, doc.content, urlpath))
+        return serve_document(template.shell(kind, doc.content, urlpath))
     end
 
     read_file(path, function(data)
         if not data then
             return not_found(client)
         end
-        if kind then
-            -- Another previewable file under the root (e.g. a linked .md): wrap its disk content.
-            return respond(client, "200 OK", "text/html; charset=utf-8", template.shell(kind, data, urlpath))
+        -- Wrap a registered document, or (root mode only) any other previewable file under the root
+        -- such as a linked .md. In documents mode a non-registered previewable file only reaches here
+        -- as an allowlisted sub-resource, so it falls through to its raw bytes below.
+        if kind and (doc or not docs_only) then
+            return serve_document(template.shell(kind, data, urlpath))
         end
         respond(client, "200 OK", mime.for_path(path), data)
     end)

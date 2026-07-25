@@ -15,11 +15,12 @@
 -- to another plugin means changing the `require` prefix and nothing else.
 --
 -- ── what it implements ────────────────────────────────────────────────────────────────────────
--- CommonMark 0.31.2 in full, plus exactly the extensions the browser pipeline it replaces had
--- enabled: GFM pipe TABLES, GFM STRIKETHROUGH (`~~text~~` → `<s>`), raw HTML pass-through, and
--- optional GFM TASK LISTS. Deliberately NOT implemented, because they change what the author wrote:
--- smart typography (curly quotes, `--` → en dash) and bare-URL autolinking. Both were on in the
--- browser renderer; both are documented in the README as the two visible differences.
+-- CommonMark 0.31.2 in full, plus the extensions the browser pipeline it replaces had enabled: GFM
+-- pipe TABLES, GFM STRIKETHROUGH (`~~text~~` → `<s>`), raw HTML pass-through, `:shortcode:` EMOJI
+-- (the full GitHub set, from `lvim-preview.markdown.emoji_data`), FOOTNOTES (`[^ref]` + `[^ref]:`,
+-- collected into a list at the document end GitHub-style), and optional GFM TASK LISTS. Emoji and
+-- footnotes default ON at the facade; task lists default off. Also a separate, non-CommonMark
+-- `polish` pass (in `lvim-preview.markdown.polish`): smart typography and bare-URL autolinking.
 --
 -- ── the document tree ─────────────────────────────────────────────────────────────────────────
 -- Every node has `type`, `line` and `end_line` (absolute, 1-based, into the source text).
@@ -35,6 +36,9 @@
 --   list            ordered, start, bullet, delimiter, tight, children(item[])
 --   item            children, task("checked"|"unchecked")
 --   table           head(MdTableRow), rows(MdTableRow[]), align[]
+--   footnote_def    fn_label, children — a `[^label]:` definition; collected, rendered at doc end
+--
+-- The document node also carries `footnotes` (label → footnote_def) and `footnote_order`.
 --
 -- Inline nodes:
 --   text            value
@@ -42,6 +46,7 @@
 --   code            value (never re-scanned)
 --   emph strong strike  children
 --   link image      dest, title, children
+--   footnote_reference  label — a `[^label]`, rendered as a superscript link to the note
 --   softbreak linebreak
 --
 -- ── tolerance ─────────────────────────────────────────────────────────────────────────────────

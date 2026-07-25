@@ -45,6 +45,9 @@ local trim = inline.trim
 ---@field line        integer     1-based first source line of the node
 ---@field end_line    integer     1-based last source line of the node
 ---@field children    OrgNode[]?  block children, or inline nodes for inline containers
+---@field caption     string?     affiliated `#+CAPTION:` value, attached to the following block
+---@field attr_html   string?     affiliated `#+ATTR_HTML:` value (`:width 300 :class foo`)
+---@field image       boolean?    link node: the target is an image to embed
 ---@field value       string?     raw text for verbatim nodes (src/example/fixed-width/latex/unknown)
 ---@field level       integer?    headline: its depth
 ---@field todo        string?     headline: its TODO keyword
@@ -711,7 +714,35 @@ parse_blocks = function(state)
             error("lvim-preview.org.parser: no progress at line " .. tostring(num(state, start)))
         end
     end
-    return out
+
+    -- Affiliated-keyword pass. `#+CAPTION:` / `#+ATTR_HTML:` describe the element that FOLLOWS them
+    -- (org's own term): they are parsed above as ordinary `keyword` nodes, and here they are removed
+    -- from the flow and attached to the next real block as `.caption` / `.attr_html`, so the renderer
+    -- can emit a <figcaption> / a table <caption> and safe HTML attributes. A caption with nothing
+    -- under it (end of scope, or only more keywords) is dropped, exactly as org does on export. Doing
+    -- this as a post-pass keeps the nine block-append sites above untouched.
+    local affiliated = {}
+    local carry = nil
+    for _, node in ipairs(out) do
+        local key = node.type == "keyword" and node.key
+        if key == "caption" or key == "attr_html" then
+            carry = carry or {}
+            carry[key] = node.value
+        elseif node.type == "keyword" then
+            -- another affiliated-style keyword we do not consume — flush the carry as its own drop
+            -- (it attaches to nothing) and keep the keyword.
+            carry = nil
+            affiliated[#affiliated + 1] = node
+        else
+            if carry then
+                node.caption = carry.caption
+                node.attr_html = carry.attr_html
+                carry = nil
+            end
+            affiliated[#affiliated + 1] = node
+        end
+    end
+    return affiliated
 end
 
 --- Parse a headline and everything under it (its own content, then its deeper subtrees).

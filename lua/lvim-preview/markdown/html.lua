@@ -35,6 +35,7 @@ local M = {}
 ---@field heading_shift integer? add this to every heading level (default 0)
 ---@field xhtml        boolean?  self-close void elements (`<br />`), as the spec's samples do
 ---@field breaks       boolean?  render a soft line break as `<br>` (default false)
+---@field footnotes    boolean?  emit the collected footnote list at the document end (default true)
 
 local ESCAPES = { ["&"] = "&amp;", ["<"] = "&lt;", [">"] = "&gt;", ['"'] = "&quot;" }
 
@@ -119,6 +120,10 @@ M.escape_url = esc_url
 ---@field nl    boolean          whether the last write ended in a newline
 ---@field opts  MdHtmlOptions
 ---@field ids   table<string, integer>  heading id → how many times it has been used
+---@field fn_defs   table<string, MdNode>  footnote definitions by lower-cased label
+---@field fn_number table<string, integer> label → the number it was assigned (reference order)
+---@field fn_order  string[]               labels in the order they were first referenced
+---@field fn_refs   table<string, integer> label → how many references to it have been rendered
 
 --- Write a literal string.
 ---@param ctx MdRenderCtx
@@ -216,6 +221,27 @@ local function render_inline(ctx, node)
                 title,
                 ctx.opts.xhtml and " /" or ""
             )
+        )
+    elseif t == "footnote_reference" then
+        -- A reference is a superscript link to the note. The note is NUMBERED the first time it is
+        -- referenced (so the list is in reference order and unreferenced notes get no number), and
+        -- each reference gets its own anchor id so the note can link back to every one of them.
+        -- A footnote_reference is only ever created with a label (see the inline scanner), so this
+        -- is a guaranteed string; the cast tells the checker what the node vocabulary guarantees.
+        local key = node.label
+        ---@cast key string
+        local n = ctx.fn_number[key]
+        if not n then
+            n = #ctx.fn_order + 1
+            ctx.fn_number[key] = n
+            ctx.fn_order[#ctx.fn_order + 1] = key
+        end
+        ctx.fn_refs[key] = (ctx.fn_refs[key] or 0) + 1
+        local k = ctx.fn_refs[key]
+        local refid = (k == 1) and ("fnref-" .. n) or ("fnref-" .. n .. "-" .. k)
+        lit(
+            ctx,
+            ('<sup class="footnote-ref"><a href="#fn-%d" id="%s" data-footnote-ref>%d</a></sup>'):format(n, refid, n)
         )
     elseif t == "softbreak" then
         lit(ctx, ctx.opts.breaks and (ctx.opts.xhtml and "<br />\n" or "<br>\n") or "\n")
@@ -373,7 +399,76 @@ render_block = function(ctx, node, tight)
         end
         lit(ctx, "</table>")
         cr(ctx)
+    elseif t == "footnote_def" then
+        -- A definition produces nothing where it sits: it is collected and rendered ONCE, as the
+        -- ordered footnote list at the document end (render_footnotes), and only if referenced.
+        return
     end
+end
+
+--- Render a set of block nodes to a STRING using the live ctx (so heading-id and footnote counters
+--- stay shared), then restore the ctx's own buffer. Used for a footnote definition's body, which is
+--- assembled separately so the back-link can be spliced into its last paragraph.
+---@param ctx MdRenderCtx
+---@param nodes MdNode[]?
+---@return string
+local function render_to_string(ctx, nodes)
+    local save_buf, save_nl = ctx.buf, ctx.nl
+    ctx.buf, ctx.nl = {}, true
+    render_blocks(ctx, nodes)
+    local out = table.concat(ctx.buf)
+    ctx.buf, ctx.nl = save_buf, save_nl
+    return out
+end
+
+--- The footnote list at the document end: every REFERENCED definition, in reference order, each an
+--- `<li id="fn-N">` whose text ends with a back-link to every reference that pointed at it. Modelled
+--- on GitHub's output (`<section class="footnotes">` + an `<ol>`). Unreferenced definitions are
+--- dropped (they never entered `fn_order`), matching GitHub.
+---@param ctx MdRenderCtx
+local function render_footnotes(ctx)
+    if #ctx.fn_order == 0 then
+        return
+    end
+    cr(ctx)
+    lit(ctx, '<section class="footnotes" data-footnotes>')
+    cr(ctx)
+    lit(ctx, '<h2 class="sr-only" id="footnote-label">Footnotes</h2>')
+    cr(ctx)
+    lit(ctx, "<ol>")
+    cr(ctx)
+    for _, key in ipairs(ctx.fn_order) do
+        local n = ctx.fn_number[key]
+        local def = ctx.fn_defs[key]
+        local body = render_to_string(ctx, def and def.children)
+        -- One back-link per reference: `↩` for the first, `↩2`, `↩3`, … for repeats.
+        local backrefs = {}
+        for k = 1, math.max(1, ctx.fn_refs[key] or 1) do
+            local refid = (k == 1) and ("fnref-" .. n) or ("fnref-" .. n .. "-" .. k)
+            local sup = (k > 1) and ("<sup>" .. k .. "</sup>") or ""
+            backrefs[#backrefs + 1] = (' <a href="#%s" data-footnote-backref class="data-footnote-backref" aria-label="Back to reference %d">↩%s</a>'):format(
+                refid,
+                n,
+                sup
+            )
+        end
+        local back = table.concat(backrefs)
+        -- GitHub puts the back-link INSIDE the note's last paragraph; do the same when the body ends
+        -- in a `</p>`, else append it after the block content. `%` is escaped for gsub's replacement.
+        if body:find("</p>%s*$") then
+            body = body:gsub("</p>(%s*)$", (back:gsub("%%", "%%%%")) .. "</p>%1", 1)
+        else
+            body = body .. back
+        end
+        lit(ctx, ('<li id="fn-%d">'):format(n))
+        lit(ctx, body)
+        lit(ctx, "</li>")
+        cr(ctx)
+    end
+    lit(ctx, "</ol>")
+    cr(ctx)
+    lit(ctx, "</section>")
+    cr(ctx)
 end
 
 --- Render a parsed markdown document to an HTML fragment (no `<html>`/`<body>` — the caller owns
@@ -383,8 +478,20 @@ end
 ---@return string html
 function M.render(doc, opts)
     ---@type MdRenderCtx
-    local ctx = { buf = {}, nl = true, opts = opts or {}, ids = {} }
+    local ctx = {
+        buf = {},
+        nl = true,
+        opts = opts or {},
+        ids = {},
+        fn_defs = doc.footnotes or {},
+        fn_number = {},
+        fn_order = {},
+        fn_refs = {},
+    }
     render_blocks(ctx, doc.children)
+    if ctx.opts.footnotes ~= false then
+        render_footnotes(ctx)
+    end
     return table.concat(ctx.buf)
 end
 

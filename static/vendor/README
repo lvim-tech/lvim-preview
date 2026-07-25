@@ -16,7 +16,7 @@ katex             | 0.16.11  | MIT          | npm katex                  → dis
 mermaid           | 11.4.1   | MIT          | npm mermaid                → dist/mermaid.min.js
 highlight.js      | 11.11.1  | BSD-3-Clause | cdnjs highlight.js 11.11.1 → highlight.min.js; npm highlight.js → styles/github{,-dark}.min.css
 github-markdown-css | 5.8.1  | MIT          | npm github-markdown-css    → github-markdown.css
-pdf.js            | 5.6.205  | Apache-2.0   | npm pdfjs-dist             → build/pdf.min.mjs, build/pdf.worker.min.mjs, standard_fonts/
+pdf.js            | 5.6.205  | Apache-2.0   | npm pdfjs-dist             → build/pdf.min.mjs, build/pdf.worker.min.mjs, standard_fonts/, cmaps/, wasm/
 
 Every asset above is permissively licensed (MIT / BSD-3-Clause / Apache-2.0), which matches this
 plugin's own BSD-3-Clause. Nothing here is copyleft, and adding something that is needs an
@@ -40,11 +40,25 @@ Notes
   markdown and org HTML renderers, which know every node's source line exactly.
 * pdf.js is ESM-only upstream (.mjs). It is bootstrapped by an inline
   `type="module"` block in template.pdf_shell, which is OUR code — no upstream
-  file is modified. `cmaps/` (CJK encodings) and `wasm/` (the JPEG-2000 and
-  OpenJPEG image decoders) are NOT vendored: they are ~2.6 MB and no TeX or
-  export toolchain output needs them. A PDF that does will render its text but
-  drop those glyphs/images. `standard_fonts/` IS vendored (the 14 standard PDF
-  fonts) because pdf.js would otherwise fetch them from a CDN.
+  file is modified. Four data directories from the SAME pdfjs-dist version are
+  vendored and served under `/@lvim-preview/vendor/pdfjs/`, each loaded strictly
+  ON DEMAND (a plain-Latin PDF pulls none of them, so the common case downloads
+  nothing extra), because pdf.js would otherwise reach for a CDN and break the
+  offline guarantee:
+    - `standard_fonts/` — the 14 standard PDF fonts (a font not embedded in the
+      document). Wired via `standardFontDataUrl`.
+    - `cmaps/`  (~1.7 MB, 169 packed `.bcmap` files) — the CJK character maps; a
+      CID-keyed CJK font needs the specific map for its encoding. Wired via
+      `cMapUrl` + `cMapPacked: true`. Without them CJK text renders as tofu.
+    - `wasm/`   (~0.9 MB) — the WebAssembly image decoders and colour transform:
+      `openjpeg.wasm` (JPEG-2000 / JPX), `jbig2.wasm` (JBIG2), `qcms_bg.wasm`
+      (ICC colour), plus `openjpeg_nowasm_fallback.js`. Wired via `wasmUrl`.
+      Each carries its own upstream LICENSE_* beside it (Apache-2.0 / BSD /
+      MIT-style, all permissive). Without them a JPEG-2000 image drops.
+  The URL option names are those of pdf.js 5.6.205 (`cMapUrl`, `wasmUrl`,
+  `standardFontDataUrl`); they have changed across major versions, so the cmaps
+  and wasm set MUST match the vendored `pdf.min.mjs` version exactly — a cmap
+  set from a different pdf.js is a silent renderer break.
 * org has no entry here BY DESIGN. The only two JS org parsers with usable
   coverage are GPL-3.0-or-later (uniorg) or too weak to accept (orgajs, MIT,
   drops TODO keywords and emits <td> for table headers), so the org path was

@@ -35,6 +35,8 @@
 --
 ---@module "lvim-preview.markdown.inline"
 
+local emoji_data = require("lvim-preview.markdown.emoji_data")
+
 local M = {}
 
 -- ── character classes ─────────────────────────────────────────────────────
@@ -59,6 +61,10 @@ local SPECIAL = {
     ["!"] = true,
     ["<"] = true,
     ["&"] = true,
+    -- `:` opens a `:shortcode:` emoji; a colon that is not one is emitted verbatim, so adding it
+    -- here is output-neutral when `emoji` is off (a lone `:` becomes the same literal text it always
+    -- was, merged back into its run by `flatten`).
+    [":"] = true,
 }
 
 --- Decode the UTF-8 codepoint starting at byte `i`.
@@ -193,6 +199,7 @@ end
 ---@field dest     string?          link / image: the destination, already unescaped
 ---@field title    string?          link / image: its title, already unescaped
 ---@field autolink boolean?         link: written as `<url>` or found by the linkify pass
+---@field label    string?          footnote_reference: its lower-cased label
 ---@field no_quotes boolean?        text: a URL's own text — never touched by the typographic passes
 ---@field children MdInlineNode[]?  container nodes: their children (after flattening)
 ---@field first    MdInlineNode?    internal: children head while scanning
@@ -342,6 +349,119 @@ local CASE_RANGES = {
     { 0x410, 0x42F, 0x20 }, -- Cyrillic
 }
 
+-- Multi-codepoint case folds: the few Unicode characters whose FULL case fold is more than one
+-- codepoint (the sharp s `ß` -> "ss", the ligatures `ﬀ` -> "ff", a handful of Greek/Armenian).
+-- `lower_cp` is arithmetic and one-to-one, so it cannot express these; a link reference label uses
+-- FULL case folding per CommonMark (so `[ß]` matches a `[SS]:` definition), so they are handled
+-- explicitly here. Generated from Unicode via Python `str.casefold()` (the 104 multi-char folds);
+-- the value is the already-UTF-8-folded bytes.
+local SPECIAL_FOLD = {
+    [223] = "\115\115",
+    [304] = "\105\204\135",
+    [329] = "\202\188\110",
+    [496] = "\106\204\140",
+    [912] = "\206\185\204\136\204\129",
+    [944] = "\207\133\204\136\204\129",
+    [1415] = "\213\165\214\130",
+    [7830] = "\104\204\177",
+    [7831] = "\116\204\136",
+    [7832] = "\119\204\138",
+    [7833] = "\121\204\138",
+    [7834] = "\97\202\190",
+    [7838] = "\115\115",
+    [8016] = "\207\133\204\147",
+    [8018] = "\207\133\204\147\204\128",
+    [8020] = "\207\133\204\147\204\129",
+    [8022] = "\207\133\204\147\205\130",
+    [8064] = "\225\188\128\206\185",
+    [8065] = "\225\188\129\206\185",
+    [8066] = "\225\188\130\206\185",
+    [8067] = "\225\188\131\206\185",
+    [8068] = "\225\188\132\206\185",
+    [8069] = "\225\188\133\206\185",
+    [8070] = "\225\188\134\206\185",
+    [8071] = "\225\188\135\206\185",
+    [8072] = "\225\188\128\206\185",
+    [8073] = "\225\188\129\206\185",
+    [8074] = "\225\188\130\206\185",
+    [8075] = "\225\188\131\206\185",
+    [8076] = "\225\188\132\206\185",
+    [8077] = "\225\188\133\206\185",
+    [8078] = "\225\188\134\206\185",
+    [8079] = "\225\188\135\206\185",
+    [8080] = "\225\188\160\206\185",
+    [8081] = "\225\188\161\206\185",
+    [8082] = "\225\188\162\206\185",
+    [8083] = "\225\188\163\206\185",
+    [8084] = "\225\188\164\206\185",
+    [8085] = "\225\188\165\206\185",
+    [8086] = "\225\188\166\206\185",
+    [8087] = "\225\188\167\206\185",
+    [8088] = "\225\188\160\206\185",
+    [8089] = "\225\188\161\206\185",
+    [8090] = "\225\188\162\206\185",
+    [8091] = "\225\188\163\206\185",
+    [8092] = "\225\188\164\206\185",
+    [8093] = "\225\188\165\206\185",
+    [8094] = "\225\188\166\206\185",
+    [8095] = "\225\188\167\206\185",
+    [8096] = "\225\189\160\206\185",
+    [8097] = "\225\189\161\206\185",
+    [8098] = "\225\189\162\206\185",
+    [8099] = "\225\189\163\206\185",
+    [8100] = "\225\189\164\206\185",
+    [8101] = "\225\189\165\206\185",
+    [8102] = "\225\189\166\206\185",
+    [8103] = "\225\189\167\206\185",
+    [8104] = "\225\189\160\206\185",
+    [8105] = "\225\189\161\206\185",
+    [8106] = "\225\189\162\206\185",
+    [8107] = "\225\189\163\206\185",
+    [8108] = "\225\189\164\206\185",
+    [8109] = "\225\189\165\206\185",
+    [8110] = "\225\189\166\206\185",
+    [8111] = "\225\189\167\206\185",
+    [8114] = "\225\189\176\206\185",
+    [8115] = "\206\177\206\185",
+    [8116] = "\206\172\206\185",
+    [8118] = "\206\177\205\130",
+    [8119] = "\206\177\205\130\206\185",
+    [8124] = "\206\177\206\185",
+    [8130] = "\225\189\180\206\185",
+    [8131] = "\206\183\206\185",
+    [8132] = "\206\174\206\185",
+    [8134] = "\206\183\205\130",
+    [8135] = "\206\183\205\130\206\185",
+    [8140] = "\206\183\206\185",
+    [8146] = "\206\185\204\136\204\128",
+    [8147] = "\206\185\204\136\204\129",
+    [8150] = "\206\185\205\130",
+    [8151] = "\206\185\204\136\205\130",
+    [8162] = "\207\133\204\136\204\128",
+    [8163] = "\207\133\204\136\204\129",
+    [8164] = "\207\129\204\147",
+    [8166] = "\207\133\205\130",
+    [8167] = "\207\133\204\136\205\130",
+    [8178] = "\225\189\188\206\185",
+    [8179] = "\207\137\206\185",
+    [8180] = "\207\142\206\185",
+    [8182] = "\207\137\205\130",
+    [8183] = "\207\137\205\130\206\185",
+    [8188] = "\207\137\206\185",
+    [64256] = "\102\102",
+    [64257] = "\102\105",
+    [64258] = "\102\108",
+    [64259] = "\102\102\105",
+    [64260] = "\102\102\108",
+    [64261] = "\115\116",
+    [64262] = "\115\116",
+    [64275] = "\213\180\213\182",
+    [64276] = "\213\180\213\165",
+    [64277] = "\213\180\213\171",
+    [64278] = "\213\190\213\182",
+    [64279] = "\213\180\213\173",
+}
+
 --- Lower-case one codepoint, as far as arithmetic case folding reaches.
 ---@param cp integer
 ---@return integer
@@ -377,7 +497,9 @@ local function normalize_label(label)
     local out, i = {}, 1
     while i <= #norm do
         local cp, len = cp_at(norm, i)
-        out[#out + 1] = utf8_char(lower_cp(cp))
+        -- Full case fold: a codepoint whose fold is multi-char (ß -> ss) uses the table; every
+        -- other codepoint folds arithmetically, one-to-one.
+        out[#out + 1] = SPECIAL_FOLD[cp] or utf8_char(lower_cp(cp))
         i = i + len
     end
     return table.concat(out)
@@ -642,7 +764,10 @@ end
 
 ---@class MdInlineOptions
 ---@field refmap table<string, { dest: string, title: string? }>?  link reference definitions
+---@field footnotes table<string, boolean|MdNode>?  known footnote labels (lower-cased), for `[^label]`
 ---@field strike boolean?  parse `~~text~~` as a deletion (default true)
+---@field emoji  boolean?  turn `:shortcode:` into its emoji glyph (default false here; the facade
+---                        defaults it on — an unknown name is left verbatim)
 
 ---@class MdInlineState
 ---@field s      string
@@ -650,6 +775,7 @@ end
 ---@field delims table?   top of the delimiter stack
 ---@field brackets table? top of the bracket stack
 ---@field refmap table
+---@field footnotes table?  label → definition, for resolving `[^label]` references
 ---@field opts   MdInlineOptions
 
 --- Classify a delimiter run of `cc` starting at `pos`, per the spec's flanking rules.
@@ -1077,6 +1203,55 @@ local function parse_close_bracket(st, block)
     end
 end
 
+--- `:` — a `:shortcode:` emoji, or a literal colon.
+---
+--- The shortcode charset is GitHub's own `:([\w+-]+):` (letters, digits, `_`, `+`, `-`, so `:+1:`
+--- and `:-1:` work). An unknown name is NOT consumed as an emoji: only the leading `:` is emitted as
+--- text and the scan resumes one byte on, so `:not_an_emoji:` survives verbatim, a bare `:` and a
+--- `::` are untouched, and the feature being off leaves every colon literal.
+---@param st MdInlineState
+---@param block MdInlineNode
+local function parse_emoji(st, block)
+    if st.opts.emoji then
+        local name, after = st.s:match("^:([%w_%+%-]+):()", st.pos)
+        if name then
+            local glyph = emoji_data[name]
+            if glyph then
+                append(block, { type = "text", value = glyph })
+                st.pos = after
+                return
+            end
+        end
+    end
+    append(block, { type = "text", value = ":" })
+    st.pos = st.pos + 1
+end
+
+--- `[^label]` — a footnote reference, when `label` names a definition collected from the document.
+---
+--- Returns false (and consumes nothing) when the bracket is not a footnote reference or the label
+--- has no matching definition, so the caller falls back to ordinary bracket handling and the text
+--- `[^label]` survives as the literal it was — never a dangling link.
+---@param st MdInlineState
+---@param block MdInlineNode
+---@return boolean matched
+local function try_footnote_ref(st, block)
+    if st.s:sub(st.pos + 1, st.pos + 1) ~= "^" then
+        return false
+    end
+    local label, after = st.s:match("^%[%^([^%]%s]+)%]()", st.pos)
+    if not label then
+        return false
+    end
+    local key = label:lower()
+    if not (st.footnotes and st.footnotes[key]) then
+        return false
+    end
+    append(block, { type = "footnote_reference", label = key })
+    st.pos = after
+    return true
+end
+
 --- Parse an inline string into a flat array of inline nodes.
 ---
 --- Never fails and never drops input: any character no scanner claims becomes text, so an
@@ -1088,7 +1263,15 @@ end
 function M.parse(s, opts)
     opts = opts or {}
     ---@type MdInlineState
-    local st = { s = s, pos = 1, delims = nil, brackets = nil, refmap = opts.refmap or {}, opts = opts }
+    local st = {
+        s = s,
+        pos = 1,
+        delims = nil,
+        brackets = nil,
+        refmap = opts.refmap or {},
+        footnotes = opts.footnotes,
+        opts = opts,
+    }
     local block = { type = "root" }
     local n = #s
 
@@ -1104,8 +1287,14 @@ function M.parse(s, opts)
             handle_delim(st, block, c)
         elseif c == "~" and opts.strike ~= false then
             handle_delim(st, block, c)
+        elseif c == ":" then
+            parse_emoji(st, block)
         elseif c == "[" then
-            push_bracket(st, block, false)
+            -- A `[^label]` that names a known footnote is a reference; anything else is an ordinary
+            -- bracket (so `[^undefined]` and a plain `[link]` both take the normal path).
+            if not (st.opts.footnotes and try_footnote_ref(st, block)) then
+                push_bracket(st, block, false)
+            end
         elseif c == "!" and s:sub(st.pos + 1, st.pos + 1) == "[" then
             push_bracket(st, block, true)
         elseif c == "]" then

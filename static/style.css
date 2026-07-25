@@ -36,13 +36,26 @@ body {
   color: var(--lp-fg) !important;
   background: var(--lp-bg) !important;
 }
-.markdown-body h1,
-.markdown-body h2,
-.markdown-body h3,
-.markdown-body h4,
-.markdown-body h5,
+/* Per-level heading colour. The "lvim" theme sets --lp-h1..--lp-h6 (from the editor's markdown
+ * heading groups — the palette rainbow) so the levels read as a hierarchy; the fixed light/dark
+ * themes set only --lp-heading, and every level falls back to it. */
+.markdown-body h1 {
+  color: var(--lp-h1, var(--lp-heading)) !important;
+}
+.markdown-body h2 {
+  color: var(--lp-h2, var(--lp-heading)) !important;
+}
+.markdown-body h3 {
+  color: var(--lp-h3, var(--lp-heading)) !important;
+}
+.markdown-body h4 {
+  color: var(--lp-h4, var(--lp-heading)) !important;
+}
+.markdown-body h5 {
+  color: var(--lp-h5, var(--lp-heading)) !important;
+}
 .markdown-body h6 {
-  color: var(--lp-heading) !important;
+  color: var(--lp-h6, var(--lp-heading)) !important;
 }
 .markdown-body h1,
 .markdown-body h2 {
@@ -65,6 +78,9 @@ body {
 .markdown-body table tr:nth-child(2n) {
   background-color: var(--lp-table-alt) !important;
 }
+.markdown-body table th {
+  background-color: var(--lp-table-header-bg, var(--lp-bg-soft)) !important;
+}
 .markdown-body table th,
 .markdown-body table td {
   border-color: var(--lp-table-border) !important;
@@ -79,6 +95,17 @@ body {
 }
 .markdown-body pre code {
   background: transparent !important;
+}
+/* highlight.js STRUCTURAL layout. The vendored github hljs stylesheet carries these, but the
+ * "lvim" theme does not link it (it generates its own colour rules from the palette instead), so
+ * the block/scroll/padding rules must live here to apply for every theme. Colour-free. */
+.markdown-body pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: 1em;
+}
+.markdown-body code.hljs {
+  padding: 3px 5px;
 }
 .markdown-body ::selection {
   background: var(--lp-selection) !important;

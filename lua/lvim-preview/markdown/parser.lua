@@ -42,6 +42,10 @@ local CODE_INDENT = 4
 ---@field tables     boolean?  parse GFM pipe tables (default true)
 ---@field strike     boolean?  parse `~~text~~` deletions (default true)
 ---@field task_lists boolean?  turn `- [ ]` into a checkbox item (default false)
+---@field footnotes  boolean?  parse `[^label]:` definitions and `[^label]` references (default false
+---                            here; the facade defaults it on)
+---@field emoji      boolean?  turn `:shortcode:` into its emoji glyph (default false here; on in the
+---                            facade)
 
 ---@class MdTableRow
 ---@field cells MdInlineNode[][]  per cell, its inline nodes
@@ -68,6 +72,8 @@ local CODE_INDENT = 4
 ---@field delimiter string?    list: `.` or `)` for an ordered list
 ---@field bullet    string?    list: `-`, `+` or `*` for a bullet list
 ---@field task      string?    item: "checked" | "unchecked" for a GFM task-list item
+---@field fn_label   string?    footnote_def: its label (as written, before lower-casing)
+---@field fn_indent  integer?   internal: a footnote definition's continuation-line indent
 ---@field rows      MdTableRow[]?  table: its body rows
 ---@field head      MdTableRow?    table: its header row
 ---@field align     string[]?  table: per column, "left" | "right" | "center" | ""
@@ -83,6 +89,8 @@ local CODE_INDENT = 4
 
 ---@class MdDocument : MdNode
 ---@field refmap table<string, { dest: string, title: string? }>  link reference definitions
+---@field footnotes table<string, MdNode>  footnote definitions by lower-cased label
+---@field footnote_order string[]           labels in first-definition order
 
 -- Tag names that open a type-6 HTML block (the "known block element" list from the spec).
 local BLOCK_TAGS = {}
@@ -258,7 +266,7 @@ local function can_contain(t, child)
     if t == "list" then
         return child == "item"
     end
-    return t == "document" or t == "block_quote" or t == "item"
+    return t == "document" or t == "block_quote" or t == "item" or t == "footnote_def"
 end
 
 -- Forward declaration: finalizing a block can close its parent, and adding a child can finalize.
@@ -408,7 +416,11 @@ local function build_table(header, align, body, first_line, opts)
     local function row(text, line)
         local cells, raw = {}, split_row(text)
         for c = 1, width do
-            cells[c] = polish.run(inline.parse(trim(raw[c] or ""), { strike = opts.strike }), opts)
+            -- Table cells are parsed inline HERE, at paragraph finalize (phase one), before the
+            -- document's footnote definitions have been gathered — so a `[^ref]` in a cell resolves
+            -- against nothing and stays literal, exactly as a link reference in a cell already does.
+            -- Emoji needs no such map, so it works in cells.
+            cells[c] = polish.run(inline.parse(trim(raw[c] or ""), { strike = opts.strike, emoji = opts.emoji }), opts)
         end
         return { cells = cells, line = line }
     end
@@ -875,6 +887,37 @@ local function start_indented_code(p)
     return 2
 end
 
+--- `[^label]: …` — a footnote definition. A CONTAINER (like a list item): the text after the
+--- marker opens its first paragraph, and lines indented under it continue it, so a note may run to
+--- several paragraphs. Like a link reference definition it does NOT interrupt a paragraph — a
+--- `[^1]:` line right under a line of prose is lazy continuation, not a definition.
+---@param p MdParserState
+---@param container MdNode
+---@return integer
+local function start_footnote_def(p, container)
+    if p.indented or p.opts.footnotes ~= true or container.type == "paragraph" then
+        return 0
+    end
+    local rest = p.line:sub(p.next_nonspace)
+    local marker = rest:match("^(%[%^[^%]%s]+%]:)")
+    if not marker then
+        return 0
+    end
+    close_unmatched(p)
+    advance_next_nonspace(p)
+    advance_offset(p, #marker, false)
+    -- One optional space after the colon is part of the marker, not the note's content.
+    if is_space_or_tab(p.line, p.offset) then
+        advance_offset(p, 1, true)
+    end
+    local node = add_child(p, "footnote_def")
+    node.fn_label = marker:match("^%[%^([^%]%s]+)%]:$")
+    -- Continuation lines are the ones indented into the definition; GFM's own rule is a 4-space
+    -- content indent, matching a top-level list item.
+    node.fn_indent = CODE_INDENT
+    return 1
+end
+
 local BLOCK_STARTS = {
     start_block_quote,
     start_atx_heading,
@@ -882,6 +925,7 @@ local BLOCK_STARTS = {
     start_html_block,
     start_setext_heading,
     start_thematic_break,
+    start_footnote_def,
     start_list_item,
     start_indented_code,
 }
@@ -975,6 +1019,20 @@ local function continue_block(p, block)
             return 1
         end
         return 0
+    elseif t == "footnote_def" then
+        -- Same continuation shape as a list item: a blank line is tolerated once there is content,
+        -- and a line indented to the definition's content column keeps feeding it.
+        if p.blank then
+            if #block.children == 0 then
+                return 1
+            end
+            advance_next_nonspace(p)
+            return 0
+        elseif p.indent >= block.fn_indent then
+            advance_offset(p, block.fn_indent, true)
+            return 0
+        end
+        return 1
     elseif t == "html_block" then
         return (p.blank and (block.html_block_type == 6 or block.html_block_type == 7)) and 1 or 0
     elseif t == "paragraph" then
@@ -983,8 +1041,10 @@ local function continue_block(p, block)
     return 1 -- heading, thematic_break, table: single-line blocks
 end
 
--- Lines that could possibly start a block; anything else is plain paragraph text.
-local MAYBE_SPECIAL = "^[#`~%*%+_=<>%-%d]"
+-- Lines that could possibly start a block; anything else is plain paragraph text. `[` is here for a
+-- `[^label]:` footnote definition (only that leads anywhere — a `[foo]: /url` link reference falls
+-- through every start and is handled at paragraph finalize, exactly as before).
+local MAYBE_SPECIAL = "^[#`~%*%+_=<>%-%d%[]"
 
 --- Run one source line through the whole algorithm.
 ---@param p MdParserState
@@ -1112,20 +1172,44 @@ local function extract_task(node)
     end
 end
 
+--- Collect every footnote definition into the document's `footnotes` map (first definition of a
+--- label wins) and record the first-seen order. Runs before inline parsing so a `[^label]` anywhere
+--- in the document — even one that appears BEFORE its definition — can resolve.
+---@param node MdNode
+---@param doc MdDocument
+local function collect_footnotes(node, doc)
+    if node.type == "footnote_def" and node.fn_label then
+        local key = node.fn_label:lower()
+        if not doc.footnotes[key] then
+            doc.footnotes[key] = node
+            doc.footnote_order[#doc.footnote_order + 1] = key
+        end
+    end
+    for _, child in ipairs(node.children or {}) do
+        collect_footnotes(child, doc)
+    end
+end
+
 --- Walk the finished block tree and parse every leaf's accumulated text into inline nodes.
 ---@param node MdNode
 ---@param refmap table
 ---@param opts MdParseOptions
-local function parse_inlines(node, refmap, opts)
+---@param footnotes table?  the collected footnote map, so `[^label]` resolves (nil = feature off)
+local function parse_inlines(node, refmap, opts, footnotes)
     if node.type == "paragraph" or node.type == "heading" then
-        node.inlines =
-            polish.run(inline.parse(trim(node.content or ""), { refmap = refmap, strike = opts.strike }), opts)
+        node.inlines = polish.run(
+            inline.parse(
+                trim(node.content or ""),
+                { refmap = refmap, strike = opts.strike, emoji = opts.emoji, footnotes = footnotes }
+            ),
+            opts
+        )
     end
     if node.type == "item" and opts.task_lists == true then
         extract_task(node)
     end
     for _, child in ipairs(node.children or {}) do
-        parse_inlines(child, refmap, opts)
+        parse_inlines(child, refmap, opts, footnotes)
     end
     node.parent = nil
     node.list_data = nil
@@ -1153,6 +1237,8 @@ function M.parse(text, opts)
         line = 1,
         end_line = math.max(#lines, 1),
         refmap = {},
+        footnotes = {},
+        footnote_order = {},
     }
     ---@type MdParserState
     local p = {
@@ -1182,7 +1268,13 @@ function M.parse(text, opts)
         finalize(p, p.tip, #lines)
     end
     finalize(p, doc, #lines)
-    parse_inlines(doc, doc.refmap, opts)
+    -- Footnote definitions must be gathered before inline parsing so a reference resolves against
+    -- the WHOLE document (a `[^1]` may precede its `[^1]:`). The map is passed to the inline scanner
+    -- only when the feature is on; off, references and definitions both stay literal.
+    if opts.footnotes == true then
+        collect_footnotes(doc, doc)
+    end
+    parse_inlines(doc, doc.refmap, opts, opts.footnotes == true and doc.footnotes or nil)
     return doc
 end
 

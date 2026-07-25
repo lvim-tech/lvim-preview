@@ -175,10 +175,16 @@ local function place_view(win, buf, line)
 end
 
 --- Apply one reported source line to the document served at `url_path`. Main thread.
+--- `source` is the client that reported it: the editor follows, and the SAME line is fanned out to
+--- every OTHER viewer of this document (never back to `source`, which is already there), so two tabs
+--- on one file stay in lockstep. The fan-out cannot ping-pong: a client that receives a `scroll`
+--- frame goes quiet (`back.quietUntil`) and never echoes it, and the editor's own WinScrolled echo is
+--- locked out by the ownership claim below.
 ---@param url_path string
 ---@param line integer
+---@param source LvimPreviewClientCtx?  the client that reported this scroll
 ---@return nil
-local function apply_scroll(url_path, line)
+local function apply_scroll(url_path, line, source)
     local back = config.sync_scroll_back or {}
     -- Re-checked here, not only at the gate: the config is live and may have been turned off
     -- between the read loop and this scheduled call.
@@ -211,6 +217,14 @@ local function apply_scroll(url_path, line)
     for _, win in ipairs(wins) do
         place_view(win, buf, line)
     end
+    -- Mirror the move to every OTHER viewer (the editor's own WinScrolled echo is suppressed by the
+    -- claim, so this explicit fan-out is what keeps a second tab in sync).
+    server.broadcast({
+        type = "scroll",
+        path = doc.url_path,
+        line = line,
+        total = api.nvim_buf_line_count(buf),
+    }, source)
 end
 
 --- Deliver one inbound viewer message to the scroll path.
@@ -221,8 +235,9 @@ end
 --- message that is anything else, or that names no previewed document, is discarded without a
 --- trace, exactly as every client frame was before this direction existed.
 ---@param payload string  the raw text-frame payload
+---@param source LvimPreviewClientCtx?  the client that sent it (fanned out to the others, not to it)
 ---@return nil
-function M.dispatch_client_message(payload)
+function M.dispatch_client_message(payload, source)
     local ok, msg = pcall(vim.json.decode, payload)
     if not ok or type(msg) ~= "table" then
         return
@@ -233,7 +248,7 @@ function M.dispatch_client_message(payload)
     local line = math.floor(msg.line)
     local url_path = msg.path
     vim.schedule(function()
-        apply_scroll(url_path, line)
+        apply_scroll(url_path, line, source)
     end)
 end
 

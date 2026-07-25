@@ -279,7 +279,10 @@
   // pdf.js is loaded as an ES module by an inline bootstrap in the shell, which hangs the
   // namespace on window.pdfjsLib and fires "lp-pdfjs". Both orders are handled: the flag may
   // already be set by the time this deferred script runs.
-  var pdf = { doc: null, scale: 1.25, busy: false };
+  // pdf.pages[i] = { num, page (proxy), wrap (div), vp (viewport), canvas (or null), task (or null) }.
+  // A page's wrap is a correctly-SIZED placeholder from load; `canvas` exists only while the page
+  // is painted (see the lazy machinery below).
+  var pdf = { doc: null, scale: 1.25, loading: false, pages: [], observer: null };
 
   function pdfLib(cb) {
     if (window.pdfjsLib) return cb(window.pdfjsLib);
@@ -292,7 +295,7 @@
     return "./" + encodeURIComponent(ART.file) + "?g=" + ART.generation;
   }
 
-  /** Where the reader is: the top visible page and the offset inside it (survives a page-count change). */
+  /** Where the reader is: the top visible page and the pixel offset into it (survives a page-count change). */
   function capturePosition() {
     var pages = document.querySelectorAll("#lp-pdf .lp-page");
     for (var i = 0; i < pages.length; i++) {
@@ -304,94 +307,218 @@
     return { page: 1, offset: 0, scale: pdf.scale };
   }
 
+  /** 0-based index of the page at the top of the viewport — the centre lazy rendering keeps around. */
+  function currentPageIndex() {
+    return capturePosition().page - 1;
+  }
+
   function restorePosition(pos) {
     if (!pos) return;
-    var el = document.querySelector('#lp-pdf .lp-page[data-page="' + pos.page + '"]');
-    if (!el) return;
-    window.scrollTo({ top: el.offsetTop + pos.offset, behavior: "auto" });
+    var p = pdf.pages[pos.page - 1];
+    if (!p) return;
+    window.scrollTo({ top: p.wrap.offsetTop + pos.offset, behavior: "auto" });
+  }
+
+  // ---- lazy page machinery -------------------------------------------------
+  // Every page gets a correctly-sized placeholder on load (its viewport is cheap — no
+  // rasterisation), but the <canvas> is painted only when the page nears the viewport and is
+  // released again when it scrolls far away, so a long PDF never holds one canvas per page. Because
+  // the placeholder keeps its exact height either way, scroll position, position-restore across a
+  // producer reload and forward-search all address a STABLE layout whether or not a page is painted.
+
+  /** Paint page `num` (1-based) into its placeholder, unless already painted or a render is in flight. */
+  function ensureRendered(num) {
+    var p = pdf.pages[num - 1];
+    if (!p || p.canvas || p.task) return;
+    var dpr = window.devicePixelRatio || 1;
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.floor(p.vp.width * dpr);
+    canvas.height = Math.floor(p.vp.height * dpr);
+    canvas.style.width = p.vp.width + "px";
+    canvas.style.height = p.vp.height + "px";
+    p.wrap.appendChild(canvas);
+    p.canvas = canvas;
+    p.task = p.page.render({
+      canvasContext: canvas.getContext("2d"),
+      viewport: p.page.getViewport({ scale: pdf.scale * dpr }),
+    });
+    p.task.promise.then(
+      function () {
+        p.task = null;
+      },
+      function () {
+        // Cancelled (released mid-render) or failed: drop the half-canvas so a return re-renders it.
+        if (p.canvas && p.canvas.parentNode) p.canvas.parentNode.removeChild(p.canvas);
+        p.canvas = null;
+        p.task = null;
+      }
+    );
+  }
+
+  /** Drop page `p`'s canvas (cancelling an in-flight render) and free its backing bitmap. */
+  function releaseCanvas(p) {
+    if (p.task) {
+      try {
+        p.task.cancel();
+      } catch (e) {}
+      p.task = null;
+    }
+    if (p.canvas) {
+      if (p.canvas.parentNode) p.canvas.parentNode.removeChild(p.canvas);
+      // Zero the backing store so the browser reclaims the bitmap now, not at some later GC.
+      p.canvas.width = 0;
+      p.canvas.height = 0;
+      p.canvas = null;
+    }
+  }
+
+  /** Keep at most `max_canvases` painted pages — the ones nearest the viewport; release the rest. */
+  function trimCanvases() {
+    var max = ART.max_canvases;
+    if (!(max > 0)) return;
+    var live = [];
+    for (var i = 0; i < pdf.pages.length; i++) {
+      var p = pdf.pages[i];
+      if (p && (p.canvas || p.task)) live.push(p);
+    }
+    if (live.length <= max) return;
+    var centre = currentPageIndex();
+    live.sort(function (a, b) {
+      return Math.abs(a.num - 1 - centre) - Math.abs(b.num - 1 - centre);
+    });
+    for (var j = max; j < live.length; j++) releaseCanvas(live[j]);
+  }
+
+  function setupObserver() {
+    if (pdf.observer) pdf.observer.disconnect();
+    // rootMargin grows the viewport by `lookahead` pages each way, so the page just past the fold
+    // is painted before it is scrolled into view and scrolling stays smooth.
+    var avg = pdf.pages.length ? pdf.pages[0].vp.height : 800;
+    var margin = Math.round(avg * (ART.lookahead || 0));
+    pdf.observer = new IntersectionObserver(
+      function (entries) {
+        var painted = false;
+        for (var i = 0; i < entries.length; i++) {
+          if (entries[i].isIntersecting) {
+            ensureRendered(parseInt(entries[i].target.getAttribute("data-page"), 10));
+            painted = true;
+          }
+        }
+        if (painted) trimCanvases();
+      },
+      { root: null, rootMargin: margin + "px 0px " + margin + "px 0px", threshold: 0 }
+    );
+    for (var k = 0; k < pdf.pages.length; k++) pdf.observer.observe(pdf.pages[k].wrap);
+  }
+
+  /**
+   * Lay out placeholders for every page of `doc` at the current scale, restore `pos`, then either
+   * wire the IntersectionObserver (lazy) or paint every page (eager). Resolves when the layout is up.
+   */
+  function layoutPages(doc, pos) {
+    if (pdf.observer) {
+      pdf.observer.disconnect();
+      pdf.observer = null;
+    }
+    pdf.pages = [];
+    var host = document.getElementById("lp-pdf");
+    var frag = document.createDocumentFragment();
+    var chain = Promise.resolve();
+    for (var n = 1; n <= doc.numPages; n++) {
+      (function (num) {
+        chain = chain.then(function () {
+          return doc.getPage(num).then(function (page) {
+            var vp = page.getViewport({ scale: pdf.scale });
+            var wrap = document.createElement("div");
+            wrap.className = "lp-page";
+            wrap.setAttribute("data-page", String(num));
+            wrap.style.width = vp.width + "px";
+            wrap.style.height = vp.height + "px";
+            frag.appendChild(wrap);
+            pdf.pages[num - 1] = { num: num, page: page, wrap: wrap, vp: vp, canvas: null, task: null };
+          });
+        });
+      })(n);
+    }
+    return chain.then(function () {
+      host.innerHTML = "";
+      host.appendChild(frag);
+      restorePosition(pos);
+      if (ART.lazy) {
+        // The observer paints whatever is visible (plus lookahead) as soon as layout settles.
+        setupObserver();
+      } else {
+        // Eager: paint every page and keep them all (the pre-lazy behaviour, opt-in).
+        for (var i = 1; i <= doc.numPages; i++) ensureRendered(i);
+      }
+      showStatus("ok");
+    });
   }
 
   function renderPdf(preserve) {
-    if (!ART || pdf.busy) return;
-    pdf.busy = true;
+    if (!ART || pdf.loading) return;
+    pdf.loading = true;
     var pos = preserve && ART.restore_position ? capturePosition() : null;
     pdfLib(function (lib) {
       var task = lib.getDocument({
         url: artifactFileUrl(),
-        // The 14 standard PDF fonts are vendored beside the library; without this pdf.js would
-        // reach for a CDN, which the offline guarantee forbids.
+        // Everything below is vendored beside the library so the page fetches NOTHING from a CDN,
+        // and every one is loaded strictly ON DEMAND — a plain-Latin PDF pulls none of them:
+        //   standard_fonts/  the 14 base PDF fonts (used when a font is not embedded);
+        //   cmaps/           packed .bcmap CJK character maps (a CID-keyed CJK font needs one);
+        //   wasm/            the JPEG-2000 / JBIG2 image decoders + the ICC colour transform.
         standardFontDataUrl: STATIC + "vendor/pdfjs/standard_fonts/",
+        cMapUrl: STATIC + "vendor/pdfjs/cmaps/",
+        cMapPacked: true,
+        wasmUrl: STATIC + "vendor/pdfjs/wasm/",
       });
       task.promise.then(
         function (doc) {
           pdf.doc = doc;
-          var host = document.getElementById("lp-pdf");
-          var frag = document.createDocumentFragment();
-          var dpr = window.devicePixelRatio || 1;
-          var chain = Promise.resolve();
-          for (var n = 1; n <= doc.numPages; n++) {
-            (function (num) {
-              chain = chain.then(function () {
-                return doc.getPage(num).then(function (page) {
-                  var vp = page.getViewport({ scale: pdf.scale });
-                  var wrap = document.createElement("div");
-                  wrap.className = "lp-page";
-                  wrap.setAttribute("data-page", String(num));
-                  wrap.style.width = vp.width + "px";
-                  wrap.style.height = vp.height + "px";
-                  var canvas = document.createElement("canvas");
-                  canvas.width = Math.floor(vp.width * dpr);
-                  canvas.height = Math.floor(vp.height * dpr);
-                  canvas.style.width = vp.width + "px";
-                  canvas.style.height = vp.height + "px";
-                  wrap.appendChild(canvas);
-                  frag.appendChild(wrap);
-                  return page.render({
-                    canvasContext: canvas.getContext("2d"),
-                    viewport: page.getViewport({ scale: pdf.scale * dpr }),
-                  }).promise;
-                });
-              });
-            })(n);
-          }
-          chain
+          layoutPages(doc, pos)
             .then(function () {
-              host.innerHTML = "";
-              host.appendChild(frag);
-              restorePosition(pos);
-              showStatus("ok");
-              pdf.busy = false;
+              pdf.loading = false;
             })
             .catch(function () {
-              pdf.busy = false;
+              pdf.loading = false;
             });
         },
         function () {
           // Not produced yet, or produced but unreadable: leave the previous render in place.
-          pdf.busy = false;
+          pdf.loading = false;
         }
       );
     });
   }
 
   function zoom(delta) {
+    if (!pdf.doc || pdf.loading) return;
     var pos = capturePosition();
+    var old = pdf.scale;
     pdf.scale = Math.min(6, Math.max(0.25, delta === 0 ? 1.25 : pdf.scale + delta));
-    renderPdf(false);
-    // renderPdf clears `pos` capture; restore against the NEW layout once it settled.
-    setTimeout(function () {
-      restorePosition({ page: pos.page, offset: pos.offset * (pdf.scale / pos.scale) });
-    }, 60);
+    pdf.loading = true;
+    // Re-lay the placeholders at the new scale and land on the same content — the pixel offset
+    // scales with the zoom ratio. getPage is cached, so this is cheap; only visible pages repaint.
+    layoutPages(pdf.doc, { page: pos.page, offset: pos.offset * (pdf.scale / old), scale: pdf.scale })
+      .then(function () {
+        pdf.loading = false;
+      })
+      .catch(function () {
+        pdf.loading = false;
+      });
   }
 
   /**
    * Forward search: scroll page `page` into view and flash a rect. `x`/`y`/`width`/`height` are
    * PDF points from the TOP-LEFT of the page — the coordinate space `synctex view` reports — so
-   * they scale by exactly the viewport scale.
+   * they scale by exactly the viewport scale. With lazy rendering the target page may not be
+   * painted yet: paint it now so the glyphs are there when we land. The canvas budget is left to
+   * the observer that fires on arrival (so the target we just painted is never the one trimmed).
    */
   function synctexTo(msg) {
     var el = document.querySelector('#lp-pdf .lp-page[data-page="' + msg.page + '"]');
     if (!el) return;
+    ensureRendered(msg.page);
     var rect = document.createElement("div");
     rect.className = "lp-synctex";
     rect.style.left = (msg.x || 0) * pdf.scale + "px";
@@ -440,6 +567,12 @@
   }
   function pathMatches(p) {
     if (!p) return true;
+    // CFG.path is what the SERVER said this page renders — authoritative, and correct even when the
+    // page was opened at the bare root "/" (which serves a document but leaves location.pathname "/").
+    // Comparing location.pathname alone breaks exactly that case: a root-opened tab would ignore its
+    // own document's update / scroll frames (theme frames are pathless, so they still applied — which
+    // is why the theme changed everywhere but live edits did not). Fall back to the location check.
+    if (CFG.path && p === CFG.path) return true;
     try {
       return decodeURIComponent(window.location.pathname) === p || decodeURIComponent(window.location.pathname).endsWith(p);
     } catch (e) {

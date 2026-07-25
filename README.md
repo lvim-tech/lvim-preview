@@ -31,6 +31,10 @@ so the browser tracks your theme.
 - **Markdown and org are rendered in Lua, inside Neovim** — no JavaScript parser on the page. The
   Markdown renderer matches 644 of the 652 CommonMark 0.31.2 conformance examples byte-for-byte
   (7 of the other 8 render identically in a browser), plus GFM tables and strikethrough.
+- **Static HTML export** (`:LvimPreview export [path]`) — write the current Markdown/org buffer to
+  **one self-contained file that opens offline**: the rendered body, the theme, and only the render
+  libraries the document actually uses are inlined (KaTeX's fonts embedded as `data:` URIs). A plain
+  note stays tens of KB; a math + diagram document carries its libraries. No server, no network.
 - **Build artifacts** — a public `register_artifact` API for plugins that compile something;
   a vendored pdf.js viewer that keeps your page and scroll position across every rebuild.
 - **`theme = "lvim"`** — preview colours generated from the lvim-utils palette, live-updated on
@@ -43,7 +47,9 @@ so the browser tracks your theme.
 
 - **Loopback only by default** (`127.0.0.1`). Binding any other address exposes the preview
   **and every file under the root** to the LAN with **no authentication** — an explicit config
-  act; `:checkhealth lvim-preview` warns when the bound address is non-loopback.
+  act. `:checkhealth lvim-preview` warns when the bound address is non-loopback, and a non-loopback
+  **start** is never silent: it emits a loud warning with the reachable URL(s) and pops a scannable
+  QR so a phone opens the preview without typing an IP (both governed by the `lan` config).
 - **Path-traversal guarded** — every request is resolved on a segment stack that can never
   escape the root; no directory listings; dotfiles are served (set `serve_hidden = false` to hide them).
 - **The browser never drives the editor unless you say so** — inbound WebSocket traffic is
@@ -85,9 +91,12 @@ require("lvim-preview").setup()
 | ------------------------- | ------------------------------------------------------------------ |
 | `:LvimPreview start [file]` | Start the server, preview `file` (or the current buffer), open it. |
 | `:LvimPreview stop`       | Stop the server and clear the serving chip.                        |
-| `:LvimPreview open`       | Re-open the browser at the current preview URL.                    |
+| `:LvimPreview open [id]`  | Re-open the browser at the current preview URL, or at artifact `id`. |
+| `:LvimPreview artifacts`  | List producer-registered artifacts; choose one to open (lvim-ui). |
+| `:LvimPreview qr`         | Show a scannable QR of the preview URL — a phone on the LAN opens it. |
 | `:LvimPreview status`     | Report address / port / root / previewed file / clients / theme.   |
 | `:LvimPreview pick`       | Choose a previewable file under the root (lvim-ui select).         |
+| `:LvimPreview export [path]` | Write the current buffer to a self-contained offline `.html` file. |
 
 ## Configuration
 
@@ -100,8 +109,34 @@ require("lvim-preview").setup({
     auto_port = true, -- scan upward from `port` when it is busy
     browser = nil, -- nil = system opener; a command string or an argv list ({ "firefox", "--new-window" })
     auto_open = true, -- open the browser on :LvimPreview start
+    -- Set to your tunnel / forwarded public base URL (e.g. "https://preview.example.com" or
+    -- "http://203.0.113.5:5500") to advertise THAT in the QR / status / start notice; nil derives from
+    -- the bind. Never auto-discovered (that needs an external service) — you set what you exposed.
+    public_url = nil, -- scheme://host[:port], or nil
     root = "project", -- "project" (root marker / cwd) | "file" (the file's dir) | "/explicit/path"
+    -- "root" = serve any file under `root` (project cross-links work, but every file under root is
+    -- readable by whatever reaches the port). "documents" = an allowlist: only the previewed files
+    -- and the local sub-resources they reference (images…) are served; everything else 404s — the
+    -- lockdown for a non-loopback / tunnelled bind, so exposure never means the whole tree.
+    serve = "root", -- "root" | "documents"
     serve_hidden = true, -- serve dotfiles under the root (on — set false to keep .env / .git unreadable)
+    -- Only fires when `address` is non-loopback (you deliberately expose the LAN). A loopback bind is
+    -- silent. `warn` = a loud start-time WARN with the no-auth note + reachable URL(s); `qr` = also pop
+    -- the scannable QR (`:LvimPreview qr` shows it on demand any time). Both on, so exposing is never silent.
+    lan = {
+        warn = true,
+        qr = true,
+    },
+    -- Auto-tunnel: with enabled = true, start spawns `cmd` (a process that forwards this loopback
+    -- server to a PUBLIC address and prints that URL), scrapes the URL with `url_pattern`, and puts it
+    -- in the QR / status — no copy-paste of a dynamic address. Default = localhost.run over ssh (zero
+    -- install, anonymous). Swap in another provider by changing cmd + url_pattern (serveo, cloudflared,
+    -- …); `{port}` becomes the real bound port. The process is killed on stop / exit.
+    tunnel = {
+        enabled = false,
+        cmd = { "ssh", "-o", "StrictHostKeyChecking=accept-new", "-R", "80:localhost:{port}", "localhost.run" },
+        url_pattern = "https://[%w.%-]+%.lhr%.life",
+    },
     debounce = 100, -- ms of idle before a type-driven push (md / org)
     sync_scroll = true, -- editor→browser scroll sync (md / org)
     -- Browser→editor scroll sync (the way back). On by default: a page scroll moves the editor window.
@@ -113,6 +148,66 @@ require("lvim-preview").setup({
         settle = 300, -- ms the side that moved last owns the sync
     },
     theme = "lvim", -- "lvim" (live palette) | "light" | "dark" | "auto"
+    -- Palette-derived detail for theme = "lvim" (the fixed light/dark/auto themes ignore it).
+    -- Nothing here is a hardcoded colour: headings and code tokens are pulled LIVE from the
+    -- tree-sitter highlight GROUPS the editor paints, base elements from named palette fields — so
+    -- the preview is the editor's own colours and follows a colorscheme change with no reload. Each
+    -- field is an OVERRIDE that pins a value; leave it nil to keep tracking the editor.
+    theme_lvim = {
+        -- Per-level heading text colour, h1..h6. nil (all six) → derive from the editor's markdown
+        -- heading highlight (heading_groups[N], i.e. the palette rainbow), so the levels read as a
+        -- hierarchy. Set an entry to a "#rrggbb" to pin that level.
+        headings = { nil, nil, nil, nil, nil, nil },
+        -- The tree-sitter group each level derives from when not pinned — exactly the groups the
+        -- editor uses to colour markdown headings, so a preview heading equals the editor's.
+        heading_groups = {
+            "@markup.heading.1.markdown",
+            "@markup.heading.2.markdown",
+            "@markup.heading.3.markdown",
+            "@markup.heading.4.markdown",
+            "@markup.heading.5.markdown",
+            "@markup.heading.6.markdown",
+        },
+        -- hljs code-token class → tree-sitter group. highlight.js tags code spans with `hljs-*`
+        -- classes; each key maps a class to the editor capture whose colour it takes, pulled LIVE
+        -- (so `hljs-keyword` is the same colour as `@keyword` in your buffer). highlight.js is
+        -- coarser than tree-sitter, so several classes fold onto the nearest capture. WHICH hljs
+        -- selectors each key drives, and its palette fallback, is the CODE_SPEC table in theme.lua.
+        code = {
+            keyword = "@keyword",
+            func = "@function",
+            builtin = "@function.builtin",
+            type = "@type",
+            variable = "@variable",
+            variable_builtin = "@variable.builtin",
+            property = "@property",
+            string = "@string",
+            regexp = "@string.regexp",
+            number = "@number",
+            literal = "@constant.builtin",
+            symbol = "@constant",
+            comment = "@comment",
+            operator = "@operator",
+            punctuation = "@punctuation.delimiter",
+            meta = "@keyword.directive",
+            tag = "@tag",
+            selector = "@variable",
+            section = "@markup.heading",
+            bullet = "@markup.list",
+            addition = "@diff.plus",
+            deletion = "@diff.minus",
+        },
+        -- Base document elements. nil → the palette default shown; a "#rrggbb" pins it.
+        link = nil, -- palette blue
+        quote_fg = nil, -- palette comment
+        quote_border = nil, -- palette purple
+        code_bg = nil, -- palette bg_dark
+        code_fg = nil, -- palette fg
+        table_header_bg = nil, -- blue tint of the page bg
+        table_alt_bg = nil, -- faint blue tint of the page bg
+        table_border = nil, -- palette bg_highlight
+        selection = nil, -- blue tint of the page bg
+    },
     -- The render KINDS enabled. Removing one makes every file mapping to it non-previewable
     -- everywhere at once: the picker stops offering it, `start` refuses it, the server stops
     -- wrapping it. (Extension → kind lives in util.EXT_KIND.)
@@ -129,10 +224,19 @@ require("lvim-preview").setup({
             typographer = true, -- (c) → ©, -- → –, ... → …, straight quotes → curly
             linkify = true, -- bare https://…, www.… and email addresses become links
             task_lists = false, -- render `- [ ]` / `- [x]` as a disabled checkbox item
+            emoji = true, -- `:shortcode:` → its emoji glyph (full GitHub set; unknown = literal)
+            footnotes = true, -- `[^ref]` + `[^ref]:` → a superscript link + an end list with a backlink
         },
         org = {
             todo_keywords = { "TODO", "DONE" }, -- keyword set the org parser treats as TODO states
         },
+    },
+    -- Static export: `:LvimPreview export [path]` writes the current buffer to ONE self-contained
+    -- .html file that opens offline (rendered body + theme + inlined libraries with data: fonts).
+    export = {
+        dir = nil, -- nil = write beside the source file (basename.html); a dir path writes there
+        embed = "auto", -- "auto" = inline ONLY the libraries the document uses (plain note stays small);
+        -- "all" = force every feature-enabled library in (for a page that builds content after load)
     },
     -- Build artifacts: files another plugin PRODUCES, served and reloaded on its signal.
     -- Nothing here is used until a producer calls register_artifact().
@@ -144,6 +248,9 @@ require("lvim-preview").setup({
         pdf = {
             restore_position = true, -- keep page / scroll across a producer reload
             highlight_ms = 1200, -- ms a forward-search highlight rect stays visible
+            lazy = true, -- render a page only as it nears the viewport; release far canvases
+            lookahead = 1, -- pages beyond the viewport (each side) kept painted ahead
+            max_canvases = 8, -- most painted-page canvases retained at once
         },
     },
     hud_chip = true, -- show the lvim-hud serving chip while the server runs
@@ -227,9 +334,26 @@ case folding, including Latin-1, Greek and Cyrillic, does work.
 
 **Extensions**, matching what the previous browser renderer had enabled: GFM pipe **tables** (with
 alignment and `\|` escapes), **strikethrough** (`~~text~~` → `<s>`), raw **HTML** pass-through,
-**typographic replacement** and **smart quotes**, and **autolinking** of bare URLs. GFM **task
-lists** are available but off by default (`features.markdown.task_lists`), because switching them
-on changes `- [ ] todo` from literal text into a rendered checkbox.
+**typographic replacement** and **smart quotes**, **autolinking** of bare URLs, `:shortcode:`
+**emoji** and **footnotes** (both on by default). GFM **task lists** are available but off by
+default (`features.markdown.task_lists`), because switching them on changes `- [ ] todo` from
+literal text into a rendered checkbox.
+
+**Emoji** (`features.markdown.emoji`, on). A `:shortcode:` becomes its emoji glyph — the full
+GitHub set (1913 shortcodes, generated from `github/gemoji` v4.1.0, MIT), so `:rocket:` → 🚀,
+`:+1:` → 👍, `:tada:` → 🎉. The shortcode charset is GitHub's own (`:[\w+-]+:`). An **unknown name
+is left verbatim** (`:not_an_emoji:` stays literal, never a broken glyph), a bare `:` or a `::` is
+untouched, and a shortcode inside a code span or a fenced code block is never expanded. Turn the
+feature off and every `:shortcode:` stays literal.
+
+**Footnotes** (`features.markdown.footnotes`, on — so Markdown matches org, which has them). A
+`text[^label]` reference becomes a superscript link, and the matching `[^label]: the note` block
+collects into an ordered **Footnotes** list at the end of the document, each note carrying a
+back-link (`↩`) to its reference. Labels are arbitrary (`[^1]`, `[^note]`). A reference to a label
+with **no definition stays literal text** — never a dangling link. An **unreferenced definition is
+dropped**, and a note referenced **more than once is numbered once with a back-link to each
+reference** (`↩`, `↩2`, …) — both matching GitHub. References work inside list items and
+blockquotes; a definition may span several paragraphs (continuation lines indented four spaces).
 
 **Autolinking is stricter than it was**, on purpose. The previous renderer linkified *fuzzily* —
 any word with a plausible TLD, no scheme required. Measured over this ecosystem's own
@@ -237,8 +361,8 @@ documentation that produced 9 wrong links and 2 right ones: `setup.py`, `noxfile
 and `CLAUDE.md` all became `http://…` anchors. Autolinking here requires an explicit scheme, a
 `www.` prefix or an email address.
 
-**Not implemented:** `:shortcode:` **emoji** (it needed the vendored Markdown plugin that went
-away with the renderer), and fuzzy schemeless autolinks as above.
+**Not implemented:** fuzzy schemeless autolinks (as above), and Unicode special-case folding of
+link reference labels (the one CommonMark example that differs functionally).
 
 **Malformed input is preserved, never dropped.** An unclosed fence runs to the end of its
 container with its body intact, a half-typed table keeps its cells, a reference definition that
@@ -265,14 +389,13 @@ dropped); links, images and targets — `[[file:./img.png]]` resolves against th
 inline markup (`*bold*`, `/italic/`, `_underline_`, `+strike+`, `=verbatim=`, `~code~`), braced
 `^{sup}` / `_{sub}`, and hard `\\` line breaks; `#+BEGIN_SRC` (highlighted by language, and
 `#+BEGIN_SRC mermaid` becomes a diagram), `QUOTE`, `EXAMPLE`, `VERSE`, `CENTER`, `EXPORT html`
-and fixed-width blocks; footnote definitions and references; drawers (collapsible); timestamps;
+and fixed-width blocks; footnote definitions and references; **`#+CAPTION:`** (a table caption, or a `<figure>` caption on a lone image) and **`#+ATTR_HTML:`** (a safe allow-list — width / height / class / alt / title / id, so an image sizes and a table takes a class; scripting attributes are dropped); drawers (collapsible); timestamps;
 horizontal rules; and LaTeX fragments (`$…$`, `$$…$$`, `\(…\)`, `\[…\]`) plus LaTeX environments
 (`\begin{align}…\end{align}`), both handed to KaTeX.
 
 **What does NOT render — deliberately, this is a reader, not an org exporter:** no Babel /
 `#+BEGIN_SRC :results` execution, no `#+INCLUDE`, no macros (`{{{name}}}`), no `#+OPTIONS` export
-switches, no agenda / clocking / column-view semantics, and no `#+CAPTION:` / `#+ATTR_HTML:`
-attachment (those keywords are parsed and kept in the tree, but nothing is rendered from them).
+switches, no agenda / clocking / column-view semantics.
 Org's *unbraced* `a_b` sub/superscripts are not applied — only `a_{b}` — because there is no way
 to tell a subscript from a `snake_case` word in prose. An absolute `[[file:/abs/path]]` link will
 not resolve (only paths under the servable root can). `#+BEGIN_EXPORT latex` is shown as text
@@ -285,6 +408,37 @@ unrecognised `#+` line is kept, and a table you are half-way through typing keep
 The parser is a self-contained module (`lua/lvim-preview/org/`) with a documented public API over
 a document tree — see `:help lvim-preview-org-api`. It is written to be shared with other
 lvim-tech plugins later, so nothing HTML-specific lives in the parsing core.
+
+## Static export
+
+`:LvimPreview export [path]` writes the current Markdown or org buffer (unsaved edits included) to a
+**single self-contained HTML file** that opens straight from the filesystem — no server, no network,
+no external request. It is a **snapshot**: the rendered document at that moment, with no live update
+and no scroll sync. Everything the page needs is inlined — the rendered body, the base + theme CSS,
+and any render libraries the document uses, with the fonts those stylesheets reference embedded as
+`data:` URIs (so KaTeX still typesets and Mermaid still draws from a `file://` URL).
+
+**Conditional inlining is the point.** Mermaid is ~2.5 MB and KaTeX ~640 KB, so `embed = "auto"` (the
+default) inlines a library **only when the document actually uses it** — KaTeX only with math,
+Mermaid only with a `mermaid` fence, highlight.js only with a fenced code block. A plain note exports
+in tens of KB; a math + diagram document carries its libraries (a few MB). The decision reuses the
+same asset selection the live page uses, so the export and the served page never disagree about what
+a document needs. Set `embed = "all"` to force every enabled library in — for a page that builds its
+diagrams or math dynamically after load.
+
+- **Output path** — omitted, it is the buffer's basename with `.html`, written beside the source
+  file (or under `export.dir` when set). A path argument may be a file or a directory. An existing
+  target is never overwritten silently — a themed lvim-ui prompt confirms first.
+- On success the written path and the file size are reported (a 4 MB export vs a 40 KB one is worth
+  seeing).
+- The **current theme** is snapshotted into the file, so an export opened weeks later does not depend
+  on the editor being open.
+
+```vim
+:LvimPreview export                      " → <buffer>.html beside the file
+:LvimPreview export ~/public/notes.html  " → an explicit path
+:LvimPreview export ~/public/            " → ~/public/<buffer>.html
+```
 
 ## Build artifacts
 
@@ -322,6 +476,19 @@ handle:close() --  unregister; the last document/artifact closed stops the serve
 - `viewer = "pdf"` renders through a vendored **pdf.js** and **restores your page and scroll
   offset after every rebuild** (`artifact.pdf.restore_position`) — the browser's built-in PDF
   viewer resets to page 1 and offers no hook for forward search. `+` / `-` / `0` zoom.
+- **Lazy rendering** (`artifact.pdf.lazy`, on by default): a page is rasterised only as it nears
+  the viewport (an `IntersectionObserver` over correctly-sized per-page placeholders), and a page
+  scrolled far away has its canvas released and re-rendered on return — so an arbitrarily long PDF
+  (a 500-page thesis) never holds hundreds of canvases. `lookahead` paints the page just past the
+  fold ahead of time for smooth scrolling; `max_canvases` caps how many are retained (the nearest
+  to the viewport win). Because every page keeps a stable-height placeholder either way, position
+  restore across a rebuild and forward-search to a not-yet-painted page both work — a `synctex`
+  jump paints its target page on arrival. Set `lazy = false` to rasterise every page up front.
+- **CJK text and JPEG-2000 images** render fully offline: the CJK character maps (`cmaps/`) and the
+  WebAssembly image decoders (`wasm/` — JPEG-2000 / JBIG2 and the ICC colour transform) are
+  vendored beside pdf.js and served locally, loaded strictly **on demand**. A plain-Latin PDF pulls
+  none of them, so the common case downloads nothing extra; a document that needs a CJK glyph or a
+  JPEG-2000 image fetches only the specific map / decoder it requires.
 - `viewer = "html"` serves the produced page with the reload client injected. `viewer = "raw"`
   serves the bytes with their MIME type and no wrapper — addressable and re-fetchable, but with
   no client on the page nothing listens for reload frames.
@@ -334,10 +501,62 @@ handle:close() --  unregister; the last document/artifact closed stops the serve
 
 ## Theme
 
-`theme = "lvim"` (default) generates the preview CSS variables from the live lvim-utils palette
-and re-pushes them on every `ColorScheme` / palette sync — the open page follows the editor with
-no reload. `"light"` / `"dark"` use a fixed GitHub-ish palette; `"auto"` ships both and lets the
-browser's `prefers-color-scheme` decide.
+`theme = "lvim"` (default) makes the preview an extension of the editor, not a foreign document:
+it is generated from the LIVE editor and re-pushed whenever the palette changes, so the open page
+follows the editor with **no reload and no re-run of `:LvimPreview`**. `"light"` / `"dark"` use a
+fixed GitHub-ish palette; `"auto"` ships both and lets the browser's `prefers-color-scheme` decide.
+
+Under `theme = "lvim"`:
+
+- **Base document** — background, body text, links, blockquotes, inline code, tables and the text
+  selection are painted from named lvim-utils palette fields (see `theme_lvim.*` above; every one is
+  overridable).
+- **Headings h1–h6** — each level takes the colour the editor gives that markdown heading level
+  (`@markup.heading.N.markdown`, the palette rainbow), so the six levels read as a hierarchy that
+  matches your buffer. Pin any level with `theme_lvim.headings[N]`.
+- **Fenced code** — highlight.js tags code spans with `hljs-*` classes; the "lvim" theme paints
+  each class with the SAME colour the editor gives the corresponding tree-sitter capture, pulled
+  live with `nvim_get_hl`. So a `local` keyword in a preview code block is the exact colour of
+  `@keyword` in your editor. (The fixed light/dark themes keep the vendored GitHub hljs stylesheet
+  instead — they have no live palette to derive from.)
+
+highlight.js is coarser than tree-sitter (no field-vs-variable distinction, class names read as
+types, and so on), so several `hljs-*` classes fold onto the nearest capture. The mapping is
+inspectable and overridable — `theme_lvim.code` (hljs class → group) above, and the full
+selector/fallback table (`CODE_SPEC`) in `lua/lvim-preview/theme.lua`:
+
+| hljs class(es) | tree-sitter group | meaning |
+|---|---|---|
+| `hljs-keyword` `hljs-doctag` `hljs-template-tag/-variable` | `@keyword` | keywords |
+| `hljs-title` `hljs-title.function_` `hljs-function` | `@function` | function names |
+| `hljs-built_in` | `@function.builtin` | built-in functions |
+| `hljs-type` `hljs-title.class_` | `@type` | types / class names |
+| `hljs-variable` | `@variable` | variables |
+| `hljs-variable.language_` | `@variable.builtin` | `this` / `self` |
+| `hljs-attr` `hljs-attribute` `hljs-property` | `@property` | fields / attributes |
+| `hljs-string` `hljs-meta .hljs-string` `hljs-code` | `@string` | strings |
+| `hljs-regexp` | `@string.regexp` | regexes |
+| `hljs-number` | `@number` | numbers |
+| `hljs-literal` | `@constant.builtin` | `true` / `false` / `null` |
+| `hljs-symbol` | `@constant` | symbols / atoms |
+| `hljs-comment` `hljs-quote` `hljs-formula` | `@comment` | comments |
+| `hljs-operator` | `@operator` | operators |
+| `hljs-punctuation` | `@punctuation.delimiter` | punctuation |
+| `hljs-meta` | `@keyword.directive` | preprocessor / decorators |
+| `hljs-name` `hljs-selector-tag/-pseudo` `hljs-tag` | `@tag` | tag names |
+| `hljs-selector-attr/-class/-id` | `@variable` | CSS selectors |
+| `hljs-section` | `@markup.heading` | section titles |
+| `hljs-bullet` | `@markup.list` | list bullets |
+| `hljs-addition` / `hljs-deletion` | `@diff.plus` / `@diff.minus` | diff hunks |
+
+**Live updates.** The preview follows the palette on both change paths: a plain `:colorscheme`
+(native `ColorScheme`) and the way lvim-colorscheme actually applies its themes — the picker's
+live-preview variant switches, which fire `User LvimColorscheme` and never go through native
+`ColorScheme`. Both re-push the generated CSS to every open tab, so changing the theme in the
+editor recolours the browser's document, headings and code at once, without a reload.
+
+The static export (`:LvimPreview export`) snapshots the generated CSS into the file, so an exported
+document carries these exact palette code colours and opens correctly offline.
 
 ## Vendored assets
 

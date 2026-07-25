@@ -17,9 +17,12 @@
 ---@class LvimPreviewDoc
 ---@field file      string   Absolute, normalised path of the document.
 ---@field bufnr     integer? Buffer of the document (when loaded).
----@field filetype  string   Resolved preview kind ("markdown"|"org"|"org"|"svg").
+---@field filetype  string   Resolved preview kind ("markdown"|"org").
 ---@field url_path  string   URL path of the file relative to the root ("/README.md").
 ---@field content   string?  Cached text of the buffer (unsaved edits included).
+---@field assets    table<string, true>?  In `serve = "documents"` mode: the set of local sub-resource
+---                          url-paths this document references (image src…), harvested from its render.
+---                          These are the ONLY non-document paths the server will serve in that mode.
 
 ---@class LvimPreviewArtifactStatus
 ---@field state   "idle"|"building"|"ok"|"error"
@@ -57,6 +60,8 @@
 ---@field theme_css string             Cached preview-theme CSS (rebuilt on the main thread; read in the fast HTTP path).
 ---@field listener  uv.uv_tcp_t?       The bound TCP listener handle.
 ---@field clients   table[]            Connected client contexts (see server/init.lua ClientCtx).
+---@field tunnel_url  string?          Public URL captured from the auto-tunnel (config.tunnel), when up.
+---@field tunnel_proc table?           The tunnel process handle (vim.system object), killed on stop/exit.
 local state = {
     running = false,
     host = "127.0.0.1",
@@ -112,6 +117,23 @@ function state.doc_for_url(url_path)
         end
     end
     return nil
+end
+
+--- Whether `url_path` is a sub-resource referenced by SOME previewed document — the allowlist that
+--- `serve = "documents"` mode consults for non-document paths (images and the like). A document's
+--- own path is served on its own account (doc_for_url), not through here. Pure — HTTP-callback safe.
+---@param url_path string?
+---@return boolean
+function state.asset_allowed(url_path)
+    if not url_path then
+        return false
+    end
+    for _, doc in pairs(state.docs) do
+        if doc.assets and doc.assets[url_path] then
+            return true
+        end
+    end
+    return false
 end
 
 --- Number of documents currently previewed.

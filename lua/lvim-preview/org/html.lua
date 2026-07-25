@@ -53,6 +53,45 @@ local function esc_url(url)
     return esc(url)
 end
 
+-- The HTML attributes an `#+ATTR_HTML:` line may set. A DELIBERATE allow-list: `#+ATTR_HTML:` in
+-- org can carry any attribute, but a document is not a trust boundary (see esc_url), so an arbitrary
+-- attribute from a file — `onclick`, `style`, `srcset` — must not reach the page. Width/height/class/
+-- alt/title/id cover the real uses (sizing an image, tagging a table) with no scripting surface.
+---@type fun(nodes: table, ctx: table): string  forward decl (defined below; figcaption_of needs it)
+local render_inline
+
+local ATTR_ALLOW = { width = true, height = true, class = true, alt = true, title = true, id = true }
+
+--- Parse an `#+ATTR_HTML:` value (`:width 300 :class foo bar`) into an HTML attribute string,
+--- keeping only the allow-listed keys and escaping every value. Returns "" for nil / nothing usable.
+---@param attr string?  the raw `#+ATTR_HTML:` value
+---@return string  a leading-space attribute string, or ""
+local function attr_html_to_string(attr)
+    if type(attr) ~= "string" or attr == "" then
+        return ""
+    end
+    local out = {}
+    -- `:key value...` pairs; a value runs until the next `:key` or end of line.
+    for key, value in attr:gmatch(":([%w_-]+)%s+([^:]*)") do
+        key = key:lower()
+        if ATTR_ALLOW[key] then
+            out[#out + 1] = (' %s="%s"'):format(key, esc(vim.trim(value)))
+        end
+    end
+    return table.concat(out)
+end
+
+--- A `<figcaption>` for a node's affiliated caption, or "" when it has none.
+---@param node OrgNode
+---@param ctx table
+---@return string
+local function figcaption_of(node, ctx)
+    if not node.caption or node.caption == "" then
+        return ""
+    end
+    return ("<figcaption>%s</figcaption>"):format(render_inline(inline.parse(node.caption), ctx))
+end
+
 --- The ` class="source-line" data-source-line="N"` attribute pair, or "" when anchors are off.
 ---@param node OrgNode
 ---@param opts OrgHtmlOptions
@@ -77,8 +116,8 @@ local function anchor_with(node, opts, extra)
 end
 
 -- Forward declarations: blocks and inline containers recurse into each other.
+-- (render_inline is forward-declared above, next to figcaption_of that needs it.)
 local render_nodes
-local render_inline
 
 --- Render a list of inline object nodes.
 ---@param nodes table[]?
@@ -242,7 +281,12 @@ local function render_table(node, ctx)
             width = #row.cells
         end
     end
-    local out = { "<table" .. anchor_with(node, ctx.opts, "org-table") .. ">" }
+    local out = { "<table" .. attr_html_to_string(node.attr_html) .. anchor_with(node, ctx.opts, "org-table") .. ">" }
+    -- An affiliated `#+CAPTION:` becomes the table's own <caption> (the first child of <table>, per
+    -- HTML), rendered inline so `*bold*` in a caption works.
+    if node.caption and node.caption ~= "" then
+        out[#out + 1] = ("<caption>%s</caption>"):format(render_inline(inline.parse(node.caption), ctx))
+    end
     local header_rows = node.has_header and node.header_rows or 0
     local seen, in_body = 0, false
     if header_rows > 0 then
@@ -332,6 +376,18 @@ local function render_node(node, ctx)
         local body = render_inline(node.children, ctx)
         if body == "" then
             return ""
+        end
+        -- An affiliated `#+CAPTION:` (and `#+ATTR_HTML:`) on a paragraph that is JUST an image wraps
+        -- it in a <figure> with a <figcaption> and applies the safe attributes to the <img>. Only a
+        -- lone image gets the figure treatment — a caption on a text paragraph has no figure to make,
+        -- so it degrades to a plain <p> (the caption is then simply not shown, as org does for prose).
+        local lone_image = #node.children == 1 and node.children[1].type == "link" and node.children[1].image
+        if node.caption and lone_image then
+            local attrs = attr_html_to_string(node.attr_html)
+            if attrs ~= "" then
+                body = body:gsub("<img", "<img" .. attrs:gsub("%%", "%%%%"), 1)
+            end
+            return ("<figure%s>%s%s</figure>"):format(anchor(node, opts), body, figcaption_of(node, ctx))
         end
         return ("<p%s>%s</p>"):format(anchor(node, opts), body)
     elseif t == "headline" then

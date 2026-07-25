@@ -100,7 +100,8 @@ local function on_ws_bytes(ctx, chunk)
                 require("lvim-preview.artifact").dispatch_client_message(f.payload)
             end
             if config.sync_scroll_back.enabled then
-                require("lvim-preview.scroll").dispatch_client_message(f.payload)
+                -- Pass the source client so the scroll can fan out to the OTHER viewers, not back to it.
+                require("lvim-preview.scroll").dispatch_client_message(f.payload, ctx)
             end
         end
         -- 0xA pong and 0x2 binary frames: ignored.
@@ -348,8 +349,11 @@ function M.start(host, port)
 end
 
 --- Broadcast a JSON message to every connected client. A write failure drops that client.
+--- `except` (a client ctx) is skipped — used to fan a browser-originated scroll out to the OTHER
+--- viewers without echoing it back to the one the reader is actively scrolling.
 ---@param message table
-function M.broadcast(message)
+---@param except LvimPreviewClientCtx?  a client to skip
+function M.broadcast(message, except)
     if #state.clients == 0 then
         return
     end
@@ -357,11 +361,13 @@ function M.broadcast(message)
     -- iterate a copy: drop_client mutates state.clients
     local snapshot = vim.list_slice(state.clients, 1, #state.clients)
     for _, ctx in ipairs(snapshot) do
-        local ok = pcall(function()
-            ctx.tcp:write(frame)
-        end)
-        if not ok then
-            drop_client(ctx)
+        if ctx ~= except then
+            local ok = pcall(function()
+                ctx.tcp:write(frame)
+            end)
+            if not ok then
+                drop_client(ctx)
+            end
         end
     end
 end

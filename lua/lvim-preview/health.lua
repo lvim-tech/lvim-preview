@@ -40,6 +40,12 @@ local VENDOR = {
     { "vendor/pdfjs/pdf.worker.min.mjs", "PDF artifact viewer worker" },
     { "vendor/pdfjs/standard_fonts/LiberationSans-Regular.ttf", "PDF standard fonts" },
     { "vendor/pdfjs/standard_fonts/LICENSE_LIBERATION", "PDF standard fonts license" },
+    -- CJK character maps (loaded on demand for a CID-keyed CJK font) and the wasm image decoders
+    -- (JPEG-2000 / JBIG2 + the ICC colour transform, loaded on demand). Each is one representative
+    -- file from its directory: the whole set is served under the same prefix.
+    { "vendor/pdfjs/cmaps/Adobe-Japan1-UCS2.bcmap", "PDF CJK cmaps" },
+    { "vendor/pdfjs/wasm/openjpeg.wasm", "PDF JPEG-2000 (JPX) decoder" },
+    { "vendor/pdfjs/wasm/LICENSE_OPENJPEG", "PDF JPEG-2000 decoder license" },
     { "vendor/pdfjs/LICENSE", "PDF viewer license" },
     { "client.js", "browser client" },
     { "style.css", "base stylesheet" },
@@ -90,7 +96,10 @@ end
 local function check_integrations(h)
     local ok_colors, colors = pcall(require, "lvim-utils.colors")
     if ok_colors and type(colors.blend) == "function" then
-        h.ok('lvim-utils palette found (theme = "lvim" tracks the editor)')
+        h.ok(
+            'lvim-utils palette found (theme = "lvim" tracks the editor — base document from the '
+                .. "palette, headings + code from the editor's tree-sitter highlight groups)"
+        )
     else
         h.warn('lvim-utils not found — theme = "lvim" falls back to a fixed dark palette')
     end
@@ -143,6 +152,34 @@ local function check_config(h)
     if not themes[config.theme] then
         h.error(('theme must be "lvim"|"light"|"dark"|"auto" (got %s)'):format(vim.inspect(config.theme)))
         problems = problems + 1
+    end
+    -- theme_lvim only matters when theme = "lvim". A malformed override there silently drops a
+    -- colour, so validate the shapes the generator reads (headings/heading_groups/code + overrides).
+    local tl = config.theme_lvim
+    if type(tl) ~= "table" then
+        h.error(("theme_lvim must be a table (got %s)"):format(vim.inspect(tl)))
+        problems = problems + 1
+    elseif config.theme == "lvim" then
+        if type(tl.headings) ~= "table" or #tl.headings > 6 then
+            h.error("theme_lvim.headings must be a list of up to 6 colour overrides (h1..h6)")
+            problems = problems + 1
+        end
+        if type(tl.heading_groups) ~= "table" or #tl.heading_groups ~= 6 then
+            h.error("theme_lvim.heading_groups must list 6 tree-sitter groups (one per heading level)")
+            problems = problems + 1
+        end
+        if type(tl.code) ~= "table" then
+            h.error("theme_lvim.code must be a table of hljs-class -> tree-sitter-group")
+            problems = problems + 1
+        else
+            for k, v in pairs(tl.code) do
+                if type(v) ~= "string" then
+                    h.error(("theme_lvim.code.%s must be a highlight-group string (got %s)"):format(k, vim.inspect(v)))
+                    problems = problems + 1
+                    break
+                end
+            end
+        end
     end
     if type(config.debounce) ~= "number" or config.debounce < 0 then
         h.error(("debounce must be a number >= 0 (got %s)"):format(vim.inspect(config.debounce)))
@@ -236,6 +273,24 @@ local function check_config(h)
             h.error(("sync_scroll_back.%s must be a number >= 0 (got %s)"):format(key, vim.inspect(back[key])))
         end
     end
+
+    -- Static export (:LvimPreview export). embed decides conditional vs forced inlining; dir, when
+    -- set, must be a directory the export can write into.
+    local ex = config.export or {}
+    if ex.embed ~= "auto" and ex.embed ~= "all" then
+        h.error(('export.embed must be "auto"|"all" (got %s)'):format(vim.inspect(ex.embed)))
+    end
+    if ex.dir ~= nil then
+        if type(ex.dir) ~= "string" then
+            h.error(("export.dir must be a string path or nil (got %s)"):format(vim.inspect(ex.dir)))
+        elseif vim.fn.isdirectory(vim.fn.expand(ex.dir)) == 0 then
+            h.warn(("export.dir does not exist yet: %s (it will be created on first export)"):format(ex.dir))
+        else
+            h.ok(("export dir: %s (embed = %s)"):format(ex.dir, tostring(ex.embed)))
+        end
+    else
+        h.ok(("export writes beside the source file (embed = %s)"):format(tostring(ex.embed)))
+    end
 end
 
 --- Vendored-asset integrity — the offline / no-CDN guarantee.
@@ -278,12 +333,17 @@ local OWN_PARSERS = {
     {
         module = "lvim-preview.markdown",
         label = "markdown",
-        source = "# T\n\n- a\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n```lua\nlocal a = 1\n```\n",
+        -- Exercises a heading, list, table, language-tagged fence, a `:rocket:` emoji and a
+        -- footnote reference+definition — the last two would otherwise fail invisibly.
+        source = "# T :rocket:\n\n- a[^n]\n\n| x | y |\n|---|---|\n| 1 | 2 |\n\n```lua\nlocal a = 1\n```\n\n[^n]: note.\n",
+        opts = { emoji = true, footnotes = true },
+        extra = { "\240\159\154\128", 'class="footnotes"' }, -- 🚀 + the footnote section
     },
     {
         module = "lvim-preview.org",
         label = "org",
         source = "* T\n- a\n\n| x | y |\n|---+---|\n| 1 | 2 |\n\n#+BEGIN_SRC lua\nlocal a = 1\n#+END_SRC\n",
+        extra = {},
     },
 }
 
@@ -298,13 +358,23 @@ local function check_own_parsers(h)
         if not loaded then
             h.error(p.module .. " failed to load: " .. tostring(mod))
         else
-            local rendered, result = pcall(mod.to_html, p.source)
+            local rendered, result = pcall(mod.to_html, p.source, p.opts)
+            local extra_ok = true
+            if rendered and type(result) == "string" then
+                for _, needle in ipairs(p.extra or {}) do
+                    if not result:find(needle, 1, true) then
+                        extra_ok = false
+                        break
+                    end
+                end
+            end
             if
                 rendered
                 and type(result) == "string"
                 and result:find("<h1", 1, true)
                 and result:find("<table", 1, true)
                 and result:find("language-lua", 1, true)
+                and extra_ok
             then
                 h.ok(p.label .. " parser + HTML renderer working (in-plugin Lua, nothing vendored)")
             else

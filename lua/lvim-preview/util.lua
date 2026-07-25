@@ -101,4 +101,42 @@ function M.is_loopback(host)
     return host == "localhost" or host == "::1" or host:match("^127%.") ~= nil
 end
 
+--- The machine's non-internal IPv4 addresses — the ones another device on the LAN can actually
+--- reach when the server binds a non-loopback (or wildcard) address. Ordered so the likely home /
+--- office LAN (192.168.*, then 10.*) comes before container bridges (172.16–31.*, e.g. docker),
+--- since the wildcard bind answers on all of them but the first is the one a phone wants.
+---@return string[]
+function M.lan_ipv4()
+    local addrs = {}
+    local ok, ifaces = pcall(vim.uv.interface_addresses)
+    if not ok or type(ifaces) ~= "table" then
+        return addrs
+    end
+    for _, entries in pairs(ifaces) do
+        for _, e in ipairs(entries) do
+            if e.family == "inet" and not e.internal and type(e.ip) == "string" then
+                addrs[#addrs + 1] = e.ip
+            end
+        end
+    end
+    local function rank(ip)
+        if ip:match("^192%.168%.") then
+            return 1
+        elseif ip:match("^10%.") then
+            return 2
+        elseif ip:match("^172%.1[6-9]%.") or ip:match("^172%.2%d%.") or ip:match("^172%.3[01]%.") then
+            return 4 -- private container-bridge range (docker et al.) — least likely the phone's LAN
+        end
+        return 3
+    end
+    table.sort(addrs, function(a, b)
+        local ra, rb = rank(a), rank(b)
+        if ra ~= rb then
+            return ra < rb
+        end
+        return a < b
+    end)
+    return addrs
+end
+
 return M

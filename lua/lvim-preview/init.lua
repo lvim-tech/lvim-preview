@@ -1,10 +1,10 @@
--- lvim-preview: a live browser preview for Markdown / HTML / AsciiDoc / org / SVG, served by an
--- in-plugin pure-Lua (libuv) HTTP + WebSocket server with hot reload as you type. This module
--- is the public API + the `:LvimPreview` command surface; the heavy lifting is split out:
+-- lvim-preview: a live browser preview for Markdown and org, served by an in-plugin pure-Lua
+-- (libuv) HTTP + WebSocket server with hot reload as you type. This module is the public API +
+-- the `:LvimPreview` command surface; the heavy lifting is split out:
 --   server/  — the uv TCP lifecycle, HTTP routing + traversal guard, the RFC 6455 handshake
 --              (pure-Lua sha1) and frame codec, and the broadcast fan-out.
---   watch    — the previewed buffer's live-update autocmds (type-driven md/org/svg,
---              save-driven html) + the content cache the fast HTTP path serves.
+--   watch    — the previewed buffer's live-update autocmds (type-driven md/org) + the content
+--              cache the fast HTTP path serves.
 --   scroll   — sync scroll: editor->browser always, browser->editor when opted in.
 --   theme    — the palette-generated preview CSS, re-pushed on ColorScheme.
 --   template — the served HTML shells; picker / browser — the chooser and the opener.
@@ -33,6 +33,9 @@ local theme = require("lvim-preview.theme")
 local browser = require("lvim-preview.browser")
 local picker = require("lvim-preview.picker")
 local artifact = require("lvim-preview.artifact")
+local export = require("lvim-preview.export")
+local qr = require("lvim-preview.qr")
+local tunnel = require("lvim-preview.tunnel")
 
 local ok_utils, utils = pcall(require, "lvim-utils.utils")
 
@@ -154,6 +157,113 @@ local function preview_url(doc)
     return ("http://%s:%d%s"):format(display_host(), state.port, doc and doc.url_path or "/")
 end
 
+--- The host another device on the LAN can reach the server at (nil when the bind is loopback-only,
+--- so nothing off this machine can connect). A wildcard bind (0.0.0.0 / ::) answers on every
+--- interface → the first detected LAN IPv4; an explicit non-loopback bind is itself the address.
+---@return string?
+local function lan_host()
+    if util.is_loopback(state.host) then
+        return nil
+    end
+    if state.host == "0.0.0.0" or state.host == "::" then
+        return util.lan_ipv4()[1]
+    end
+    return state.host
+end
+
+--- The URL another device should use for the preview: the explicit `public_url` when set (a tunnel
+--- or forwarded IP — reachable from anywhere), else the LAN address when the server is exposed, else
+--- the loopback URL (only this machine can open it — the caller says so).
+---@param doc LvimPreviewDoc?
+---@return string url, boolean remote  -- `remote` = reachable from another device
+local function reachable_url(doc)
+    local path = doc and doc.url_path or "/"
+    -- A captured auto-tunnel URL (runtime) wins over a statically configured one.
+    local pub = state.tunnel_url or config.public_url
+    if type(pub) == "string" and pub ~= "" then
+        return (pub:gsub("/+$", "")) .. path, true
+    end
+    local host = lan_host()
+    if host then
+        return ("http://%s:%d%s"):format(host, state.port, path), true
+    end
+    return preview_url(doc), false
+end
+
+--- Show a scannable QR of `url` in a centred, themed lvim-ui window (fixed black/white cells so it
+--- scans under any editor theme). `note` is an optional caption line (e.g. the loopback caveat).
+--- `enter` focuses it so `q` closes immediately; false leaves the cursor in the editor.
+---@param url string
+---@param note string?
+---@param enter boolean
+---@return nil
+local function show_qr(url, note, enter)
+    local matrix, meta = qr.encode(url)
+    if not matrix then
+        notify(("cannot build a QR for %s (%s)"):format(url, tostring(meta)), vim.log.levels.WARN)
+        return
+    end
+    ---@cast meta LvimPreviewQrMeta
+    qr.define_highlights()
+    local lines, highlights = qr.render(matrix, meta.size)
+    local width = vim.fn.strdisplaywidth(lines[1] or "")
+    -- Caption rows below the code (blank spacer, URL, optional note), centred under the QR. They live
+    -- AFTER the QR rows, so the QR's own highlight row indices stay valid.
+    local function centred(s)
+        local pad = math.max(0, math.floor((width - vim.fn.strdisplaywidth(s)) / 2))
+        return string.rep(" ", pad) .. s
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = centred(url)
+    if note then
+        lines[#lines + 1] = centred(note)
+    end
+    local ok_ui, ui = pcall(require, "lvim-ui")
+    if not ok_ui then
+        notify("scan to open: " .. url) -- lvim-ui absent → the URL is still actionable
+        return
+    end
+    ui.info(lines, {
+        title = "Scan to open",
+        highlights = highlights,
+        enter = enter,
+        hide_cursor = true,
+    })
+end
+
+--- Announce an EXPOSED start — the bind is non-loopback (raw LAN, no auth) and/or a `public_url` is
+--- configured (a tunnel/forwarded address). `lan.warn` controls the notice, `lan.qr` the scannable
+--- QR. A raw LAN bind gets the loud no-auth warning + every reachable URL; a loopback+public_url
+--- (tunnel) start just advertises the public URL. `doc` scopes the URL to the file.
+---@param doc LvimPreviewDoc?
+---@return nil
+local function announce_exposure(doc)
+    local lan = config.lan or {}
+    local url = select(1, reachable_url(doc))
+    local raw_lan = not util.is_loopback(state.host) -- the bind itself exposes the LAN with no auth
+    if lan.warn ~= false then
+        if raw_lan then
+            local urls = {}
+            for _, ip in ipairs(util.lan_ipv4()) do
+                urls[#urls + 1] = ("http://%s:%d%s"):format(ip, state.port, doc and doc.url_path or "/")
+            end
+            local where = #urls > 0 and table.concat(urls, "\n  ") or url
+            notify(
+                "serving on a NON-loopback address — the preview and every file under the root are "
+                    .. "reachable by any host on the network, with NO authentication. Reachable at:\n  "
+                    .. where,
+                vim.log.levels.WARN
+            )
+        else
+            -- Loopback bind behind a configured public_url (a tunnel/proxy adds its own TLS + auth).
+            notify(("also reachable publicly at %s (public_url)"):format(url))
+        end
+    end
+    if lan.qr ~= false then
+        show_qr(url, nil, true)
+    end
+end
+
 --- Ensure a loaded buffer exists for `file` (so the live-update autocmds can attach), returning
 --- its bufnr. Reuses the current buffer / an existing one; loads the file otherwise.
 ---@param file string
@@ -220,8 +330,18 @@ function M.preview_file(file)
             notify("could not start the server: " .. tostring(err), vim.log.levels.ERROR)
             return false
         end
-        local warn = not util.is_loopback(state.host) and "  (LAN-exposed, no auth)" or ""
-        notify(("serving %s:%d%s"):format(display_host(), state.port, warn))
+        local pub = config.public_url
+        if (config.tunnel or {}).enabled then
+            -- The tunnel assigns the public URL asynchronously; announce (WARN/QR) once it is captured.
+            notify(("serving %s:%d — opening tunnel…"):format(display_host(), state.port))
+            tunnel.ensure(state.port, function()
+                announce_exposure(doc)
+            end)
+        elseif not util.is_loopback(state.host) or (type(pub) == "string" and pub ~= "") then
+            announce_exposure(doc) -- WARN/notice + reachable URL(s) + the scannable QR (config `lan`)
+        else
+            notify(("serving %s:%d"):format(display_host(), state.port))
+        end
     end
     -- NOTE: no global `reload` broadcast here. The server already serves every registered
     -- document, so a new preview must not yank the tabs showing the others onto it.
@@ -287,6 +407,7 @@ function M.stop(file)
     watch.detach_all()
     scroll.detach_all()
     artifact.close_all()
+    tunnel.stop() -- kill the auto-tunnel process, if one is up
     server.stop()
     state.docs = {}
     notify("stopped")
@@ -321,9 +442,24 @@ end
 --- Re-open the browser: the current buffer's document when it is previewed, else the first
 --- document, else the first registered artifact (a server may be serving only artifacts).
 ---@return nil
-function M.open()
+--- Open a served page in the browser. With no argument: the current buffer's preview (or the first
+--- document, else the first artifact). With an artifact `id`: that artifact — the addressable half
+--- of `artifacts` below, so a producer-registered document (a built PDF, an HTML render) is reachable
+--- by name from the command line, not only through the producer's own handle.
+---@param id? string  an artifact id (from `:LvimPreview artifacts`); nil = the current document
+---@return nil
+function M.open(id)
     if not server.is_running() then
         notify("not running — start a preview first", vim.log.levels.WARN)
+        return
+    end
+    if id and id ~= "" then
+        local h = require("lvim-preview.artifact").handle(id)
+        if not h then
+            notify(("no artifact with id %q — see :LvimPreview artifacts"):format(id), vim.log.levels.WARN)
+            return
+        end
+        browser.open(h:url(), config.browser)
         return
     end
     local doc = state.doc_for_buf(vim.api.nvim_get_current_buf()) or state.list()[1]
@@ -337,6 +473,54 @@ function M.open()
         return
     end
     browser.open(("http://%s:%d%s"):format(display_host(), state.port, art.url_path), config.browser)
+end
+
+--- List the registered artifacts through the canonical picker; choosing one opens it. Artifacts are
+--- produced by OTHER plugins (a LaTeX build's PDF, an HTML render) and were reachable only through
+--- the producer's handle until now — this makes them visible and openable from the editor.
+---@return nil
+function M.artifacts()
+    if not server.is_running() then
+        notify("not running — no server to hold artifacts", vim.log.levels.WARN)
+        return
+    end
+    local arts = require("lvim-preview.artifact").list()
+    if #arts == 0 then
+        notify("no artifacts registered (a producer plugin registers them; none has)", vim.log.levels.INFO)
+        return
+    end
+    local items = {}
+    for _, a in ipairs(arts) do
+        items[#items + 1] = {
+            -- title, then the viewer kind and live state as trailing context, then the source path.
+            label = ("%s  [%s · %s]  %s"):format(a.title, a.viewer, a.state, vim.fn.fnamemodify(a.path, ":~")),
+            icon = config.icons.file,
+            id = a.id,
+        }
+    end
+    require("lvim-ui").select({
+        title = "Artifacts",
+        items = items,
+        callback = function(confirmed, index)
+            if confirmed and index then
+                M.open(items[index].id)
+            end
+        end,
+    })
+end
+
+--- Show a QR of the current preview URL so a phone on the LAN can open it without typing an IP.
+--- Uses the reachable LAN address when the server is exposed; on a loopback-only bind it shows the
+--- loopback URL with a note that only this machine can reach it (bind a LAN `address` to use a phone).
+---@return nil
+function M.qr()
+    if not server.is_running() then
+        notify("not running — start a preview first", vim.log.levels.WARN)
+        return
+    end
+    local doc = state.doc_for_buf(vim.api.nvim_get_current_buf()) or state.list()[1]
+    local url, lan = reachable_url(doc)
+    show_qr(url, lan and nil or "loopback only — reachable from this machine, not a phone", true)
 end
 
 --- The root to scan for the chooser: the live server's root while running, else the root of the
@@ -365,6 +549,15 @@ function M.pick()
     end)
 end
 
+--- Export the current buffer to a self-contained static HTML file (offline snapshot). Independent
+--- of the live server — it renders the buffer, inlines the CSS + only the render libraries the
+--- document uses (with their fonts as data: URIs), and writes one file. See `lvim-preview.export`.
+---@param path string?  optional output path (a file, or a directory to write the default name into)
+---@return nil
+function M.export(path)
+    export.run(path)
+end
+
 --- Report the current server / preview status via a notification.
 ---@return nil
 function M.status()
@@ -378,10 +571,15 @@ function M.status()
             state.host,
             util.is_loopback(state.host) and " (loopback)" or " (LAN-exposed, NO AUTH)"
         ),
-        ("root    : %s"):format(state.root),
+    }
+    if type(config.public_url) == "string" and config.public_url ~= "" then
+        lines[#lines + 1] = ("public  : %s"):format(config.public_url)
+    end
+    vim.list_extend(lines, {
+        ("root    : %s  (serve = %s)"):format(state.root, config.serve),
         ("clients : %d"):format(server.client_count()),
         ("theme   : %s"):format(config.theme),
-    }
+    })
     -- Every previewed document, not just one: the set is what the server is serving.
     local docs = state.list()
     lines[#lines + 1] = ("files   : %d"):format(#docs)
@@ -417,7 +615,7 @@ end
 
 -- ── command ───────────────────────────────────────────────────────────────
 
-local SUBCOMMANDS = { "start", "stop", "open", "status", "pick" }
+local SUBCOMMANDS = { "start", "stop", "open", "artifacts", "qr", "status", "pick", "export" }
 
 --- Register the :LvimPreview command (once).
 ---@return nil
@@ -429,21 +627,41 @@ local function register_command()
         elseif sub == "stop" then
             M.stop(cmd.fargs[2]) -- optional path: stop ONE document, keep the rest previewing
         elseif sub == "open" then
-            M.open()
+            M.open(cmd.fargs[2]) -- optional artifact id
+        elseif sub == "artifacts" then
+            M.artifacts()
+        elseif sub == "qr" then
+            M.qr()
         elseif sub == "pick" then
             M.pick()
+        elseif sub == "export" then
+            M.export(cmd.fargs[2]) -- optional output path (file or directory)
         elseif sub == "status" then
             M.status()
         else
-            notify("unknown subcommand: " .. sub .. " (start|stop|open|status|pick)", vim.log.levels.WARN)
+            notify(
+                "unknown subcommand: " .. sub .. " (start|stop|open|artifacts|qr|status|pick|export)",
+                vim.log.levels.WARN
+            )
         end
     end, {
         nargs = "*",
         complete = function(arg, line)
             local words = vim.split(vim.trim(line), "%s+")
             if #words > 2 or (#words == 2 and arg == "") then
-                if words[2] == "start" then
+                -- Both `start` and `export` take a path argument — complete it against the fs.
+                if words[2] == "start" or words[2] == "export" then
                     return vim.fn.getcompletion(arg, "file")
+                end
+                if words[2] == "open" then
+                    -- the artifact ids, so `:LvimPreview open <Tab>` completes what can be opened
+                    local ids = {}
+                    for _, a in ipairs(require("lvim-preview.artifact").list()) do
+                        if arg == "" or a.id:find(arg, 1, true) == 1 then
+                            ids[#ids + 1] = a.id
+                        end
+                    end
+                    return ids
                 end
                 return {}
             end
@@ -451,7 +669,7 @@ local function register_command()
                 return arg == "" or c:find(arg, 1, true) == 1
             end, SUBCOMMANDS)
         end,
-        desc = "lvim-preview: start [file] | stop | open | status | pick",
+        desc = "lvim-preview: start [file] | stop | open [artifact-id] | artifacts | qr | status | pick | export [path]",
     })
 end
 
@@ -477,18 +695,22 @@ function M.setup(opts)
     register_command()
 
     local grp = vim.api.nvim_create_augroup("lvim_preview", { clear = true })
-    -- Live theme: rebuild the CSS and push it to every open tab so the page follows the editor.
-    vim.api.nvim_create_autocmd("ColorScheme", {
-        group = grp,
-        callback = function()
-            theme.refresh_and_push()
-        end,
-    })
-    pcall(function()
-        require("lvim-utils.colors").on_change(function()
-            theme.refresh_and_push()
-        end)
-    end)
+    -- Live theme: rebuild the CSS (base palette vars + the editor's tree-sitter code colours) and
+    -- push it to every open tab, so the page — document AND syntax colours — follows the editor with
+    -- no reload and no re-run of :LvimPreview. TWO events, the same seam lvim-utils.highlight uses:
+    --   * native `ColorScheme` — a plain `:colorscheme` (a third-party theme, or lvim-colorscheme's
+    --     own restore path that goes through `:colorscheme`).
+    --   * `User LvimColorscheme` — how lvim-colorscheme ACTUALLY applies its themes, INCLUDING the
+    --     picker's live-preview variant switches: it sets the highlights directly and fires this
+    --     event, it does NOT go through native `ColorScheme`. Listening only for `ColorScheme` would
+    --     leave the browser one theme behind on every palette change made the way the user makes it.
+    -- refresh_and_push reads the NEW colours either way: lvim-colorscheme applies the highlights
+    -- BEFORE firing the event, so nvim_get_hl (the code + heading colours) is always current.
+    local function repush()
+        theme.refresh_and_push()
+    end
+    vim.api.nvim_create_autocmd("ColorScheme", { group = grp, callback = repush })
+    vim.api.nvim_create_autocmd("User", { group = grp, pattern = "LvimColorscheme", callback = repush })
     -- Complete teardown on exit — no orphaned port, no leaked timer handle.
     vim.api.nvim_create_autocmd("VimLeavePre", {
         group = grp,

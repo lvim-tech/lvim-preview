@@ -19,7 +19,6 @@ M.map = {
     map = "application/json; charset=utf-8",
     txt = "text/plain; charset=utf-8",
     md = "text/plain; charset=utf-8",
-    adoc = "text/plain; charset=utf-8",
     org = "text/plain; charset=utf-8",
     xml = "application/xml; charset=utf-8",
     svg = "image/svg+xml",
@@ -37,6 +36,9 @@ M.map = {
     otf = "font/otf",
     eot = "application/vnd.ms-fontobject",
     wasm = "application/wasm",
+    -- pdf.js packed CJK character maps (cmaps/*.bcmap). Binary; pdf.js fetches them as an
+    -- ArrayBuffer and never inspects the type, but naming it keeps the served type honest.
+    bcmap = "application/octet-stream",
     pdf = "application/pdf",
     mp4 = "video/mp4",
     webm = "video/webm",

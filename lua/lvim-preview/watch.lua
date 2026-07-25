@@ -69,6 +69,12 @@ M.refresh_content = refresh_content
 local function push_update(doc)
     local content = doc.content or ""
     local rendered = template.server_render(doc.filetype, content)
+    -- In documents mode, re-harvest the sub-resources this render references, so an image ADDED while
+    -- the page is live (its request arrives after the WS update, not through the HTTP shell) is
+    -- allowlisted too. Keyed on the rendered body — the same input the client places.
+    if config.serve == "documents" and rendered then
+        doc.assets = template.local_refs(rendered, doc.url_path)
+    end
     server.broadcast({
         type = "update",
         path = doc.url_path,

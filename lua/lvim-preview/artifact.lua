@@ -345,6 +345,30 @@ function M.handle(id)
     return handle
 end
 
+--- Every registered artifact, as a list of plain data — the public shape `:LvimPreview artifacts`
+--- and any other consumer reads. Internal fields (`on_message`, the raw registry entry) are NOT
+--- exposed: a caller that wants to act on one takes a `handle(id)`. Sorted by title for a stable
+--- listing. Returns `{}` when nothing is registered.
+---@return { id: string, title: string, name: string, path: string, url: string, viewer: string, state: string }[]
+function M.list()
+    local out = {}
+    for id, art in pairs(state.artifacts) do
+        out[#out + 1] = {
+            id = id,
+            title = art.title,
+            name = art.name,
+            path = art.path,
+            url = ("http://%s:%d%s"):format(display_host(), state.port, art.url_path),
+            viewer = art.viewer,
+            state = (art.status and art.status.state) or "idle",
+        }
+    end
+    table.sort(out, function(a, b)
+        return (a.title or "") < (b.title or "")
+    end)
+    return out
+end
+
 --- Unregister every artifact (a full `:LvimPreview stop`). Does not stop the server itself —
 --- the caller owns that teardown.
 ---@return nil
