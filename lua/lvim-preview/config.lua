@@ -41,7 +41,7 @@
 
 ---@class LvimPreviewArtifactPdf
 ---@field restore_position boolean  keep page / scroll / zoom across a producer reload
----@field highlight_ms     integer  ms a forward-search highlight rect stays visible
+---@field highlight_ms     integer  ms a forward-search highlight rect stays visible (0 = no rect)
 ---@field lazy             boolean  render a page only as it nears the viewport (an
 ---                                 IntersectionObserver over per-page placeholders), releasing far
 ---                                 canvases — so a 500-page PDF never holds 500 canvases. Off =
@@ -350,6 +350,9 @@ return {
         stall_note_ms = 10000,
         pdf = {
             restore_position = true,
+            -- 0 draws NO band: the page just scrolls to the target. That is what a producer syncing
+            -- continuously (an editor following its cursor) usually wants — a band appearing and
+            -- fading every few hundred ms is noise rather than information.
             highlight_ms = 1200,
             -- Lazy page rendering: a page is rasterised only as it nears the viewport and its
             -- canvas is released again when it scrolls far away, so an arbitrarily long PDF (a

@@ -515,10 +515,50 @@
    * painted yet: paint it now so the glyphs are there when we land. The canvas budget is left to
    * the observer that fires on arrival (so the target we just painted is never the one trimmed).
    */
+  /**
+   * The ONE live forward-search highlight, and the timer that will remove it. There is deliberately
+   * never a second: a producer that syncs continuously (an editor following the cursor) sends a frame
+   * every few hundred ms, and with a per-rect timer each one lived out its own 1200 ms — so the page
+   * accumulated a stack of translucent bands at the positions it had passed through. A newer target
+   * SUPERSEDES the older one; that is also the truthful reading, since only one place is current.
+   */
+  var synctexRect = null;
+  var synctexTimer = null;
+
+  function clearSynctex() {
+    // `!== null`, not truthiness: a timer HANDLE of 0 is legal (and the first one a fresh page hands
+    // out can be exactly that), so `if (synctexTimer)` would leave the very first highlight's timer
+    // running and let it delete a newer rect out from under the viewer.
+    if (synctexTimer !== null) {
+      clearTimeout(synctexTimer);
+      synctexTimer = null;
+    }
+    if (synctexRect && synctexRect.parentNode) synctexRect.parentNode.removeChild(synctexRect);
+    synctexRect = null;
+    // Belt for a rect left by an earlier page render (a reload replaces .lp-page nodes wholesale, so
+    // a rect can outlive the element this closure remembered).
+    var stale = document.querySelectorAll("#lp-pdf .lp-synctex");
+    for (var i = 0; i < stale.length; i++) {
+      if (stale[i].parentNode) stale[i].parentNode.removeChild(stale[i]);
+    }
+  }
+
   function synctexTo(msg) {
     var el = document.querySelector('#lp-pdf .lp-page[data-page="' + msg.page + '"]');
     if (!el) return;
     ensureRendered(msg.page);
+    clearSynctex();
+    // `0` means NO band — scroll there and leave the page alone. Resolved with explicit null checks
+    // for the same reason the timer guard uses them: `a || b` cannot express a deliberate zero, so
+    // `highlight_ms = 0` used to fall through to the 1200 ms default and there was no way to turn the
+    // flash off. A producer that syncs continuously is exactly who wants that.
+    var ms = msg.highlight_ms;
+    if (ms === undefined || ms === null) ms = ART && ART.highlight_ms;
+    if (ms === undefined || ms === null) ms = 1200;
+    if (!(ms > 0)) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      return;
+    }
     var rect = document.createElement("div");
     rect.className = "lp-synctex";
     rect.style.left = (msg.x || 0) * pdf.scale + "px";
@@ -526,13 +566,11 @@
     rect.style.width = (msg.width ? msg.width * pdf.scale : el.clientWidth - (msg.x || 0) * pdf.scale) + "px";
     rect.style.height = (msg.height ? msg.height * pdf.scale : 14 * pdf.scale) + "px";
     el.appendChild(rect);
+    synctexRect = rect;
     rect.scrollIntoView({ behavior: "smooth", block: "center" });
-    setTimeout(
-      function () {
-        if (rect.parentNode) rect.parentNode.removeChild(rect);
-      },
-      msg.highlight_ms || (ART && ART.highlight_ms) || 1200
-    );
+    synctexTimer = setTimeout(function () {
+      clearSynctex();
+    }, ms);
   }
 
   /**

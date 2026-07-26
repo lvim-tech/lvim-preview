@@ -476,6 +476,10 @@ handle:close() --  unregister; the last document/artifact closed stops the serve
   finished coherently. A half-written PDF must never be fetched, and tools differ (some write in
   place, some write-then-rename). `watch = true` is available for producers with no completion
   signal; it watches the file's directory, so a write-then-rename still fires.
+- **A forward search draws ONE highlight.** A newer target supersedes the older one, so a producer
+  that syncs continuously (an editor following its cursor) leaves a single band that marks where you
+  are, not a stack of translucent lines at every position it passed through.
+  `artifact.pdf.highlight_ms = 0` turns the band off entirely and just scrolls.
 - `viewer = "pdf"` renders through a vendored **pdf.js** and **restores your page and scroll
   offset after every rebuild** (`artifact.pdf.restore_position`) — the browser's built-in PDF
   viewer resets to page 1 and offers no hook for forward search. `+` / `-` / `0` zoom.
