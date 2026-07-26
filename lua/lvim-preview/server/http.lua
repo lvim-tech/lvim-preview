@@ -261,6 +261,15 @@ local function serve_doc(client, urlpath)
         local first = state.list()[1]
         urlpath = first and first.url_path or "/"
     end
+    -- A server started by an ARTIFACT alone (a producer registered a built PDF; no buffer was ever
+    -- previewed) has no document root: `state.root` is still "" and every path below would resolve
+    -- against it as if the root were `/`, making the whole filesystem readable through this route.
+    -- There is no document tree in that mode, so the document route serves nothing at all and the
+    -- artifact prefix — which confines itself to its own directory — stays the only way in.
+    if state.root == "" then
+        return not_found(client)
+    end
+
     -- Resolve the document by the REQUESTED url_path, not by "the" previewed file: any number of
     -- documents are live at once, and each tab asks for its own. Matching on the stored url_path
     -- also keeps this fast-path safe (no vim.fs call inside the libuv callback).

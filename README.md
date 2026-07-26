@@ -469,6 +469,9 @@ handle:close() --  unregister; the last document/artifact closed stops the serve
   root that documents are served from, and the same traversal guard applies.
 - `register_artifact` starts the server if it is not running. An artifact keeps it alive on its
   own, so closing the last previewed document does not pull the page out from under a build.
+- A server started by an artifact ALONE serves **only** artifacts: with no document previewed there
+  is no servable root, so every other path is `404`. A producer plugin can therefore run the server
+  without exposing any part of the filesystem.
 - **`reload()` is the default, not a file watcher, on purpose:** only the producer knows a build
   finished coherently. A half-written PDF must never be fetched, and tools differ (some write in
   place, some write-then-rename). `watch = true` is available for producers with no completion

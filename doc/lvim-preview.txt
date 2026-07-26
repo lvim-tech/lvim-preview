@@ -491,6 +491,9 @@ URL AND LIFECYCLE
   - `register_artifact` starts the server when it is not running. An artifact
     keeps it alive on its own: closing the last previewed document does not
     pull the page out from under a build.
+  - A server started by an ARTIFACT ALONE serves only artifacts. With no
+    document previewed there is no servable root, so every other path is 404 —
+    a producer plugin can run the server without exposing the filesystem.
 
 WHY reload() AND NOT A WATCHER BY DEFAULT
   Only the producer knows a build finished COHERENTLY. A half-written PDF must
