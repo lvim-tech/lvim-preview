@@ -15,9 +15,11 @@ local M = {}
 function M.open(url, browser)
     if browser == nil or browser == "" then
         -- Native platform opener (handles Linux/macOS/Windows selection itself).
-        local ok, err = pcall(vim.ui.open, url)
-        if not ok then
-            vim.notify("lvim-preview: could not open the browser: " .. tostring(err), vim.log.levels.WARN)
+        -- Through the shared opener: `vim.ui.open` signals a missing handler by RETURNING `nil, err`
+        -- rather than raising, so neither a bare `pcall` status nor its second value is the answer.
+        local opened, why = require("lvim-utils.utils").open_url(url)
+        if not opened then
+            vim.notify("lvim-preview: could not open the browser: " .. (why or "?"), vim.log.levels.WARN)
         end
         return
     end
