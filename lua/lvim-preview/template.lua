@@ -402,8 +402,13 @@ function M.pdf_shell(art)
         -- pdf.js is ESM-only upstream; this inline module is OURS, not a patched vendor file.
         table.concat({
             '<script type="module">',
+            -- The shim FIRST, and by static import so it is evaluated before the bundle that needs
+            -- it: pdf.js 5.6 calls `Map.prototype.getOrInsertComputed`, which V8 ships only after
+            -- Chromium 140. Without it the bundle throws on first use and the page stays blank.
+            ('import "%svendor/pdfjs/upsert-shim.mjs";'):format(P),
             ('import * as pdfjsLib from "%svendor/pdfjs/pdf.min.mjs";'):format(P),
-            ('pdfjsLib.GlobalWorkerOptions.workerSrc = "%svendor/pdfjs/pdf.worker.min.mjs";'):format(P),
+            -- …and the worker is a separate realm, so it gets its own shimmed entry point.
+            ('pdfjsLib.GlobalWorkerOptions.workerSrc = "%svendor/pdfjs/worker-shim.mjs";'):format(P),
             "window.pdfjsLib = pdfjsLib;",
             'window.dispatchEvent(new Event("lp-pdfjs"));',
             "</script>",
