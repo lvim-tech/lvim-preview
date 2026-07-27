@@ -182,6 +182,87 @@ body:has(> #lp-content) {
 #lp-pdf .lp-page canvas {
   display: block;
 }
+/* The selectable text layer: pdf.js lays transparent, absolutely positioned spans over the canvas at
+   the glyph positions, which is what makes the page selectable, searchable with the browser's own
+   find, and copyable. The spans are invisible BY DESIGN — the glyphs the reader sees are on the
+   canvas underneath; these only have to occupy the same space.
+
+   THESE RULES ARE pdf.js's OWN (web/text_layer_builder.css, v5.6.205), scoped to our container and
+   with the selection colour taken from the theme. They are not decoration and they are not
+   guessable: `text_layer.js` sets `--font-height` and `--scale-x` on every span and expects the
+   stylesheet to turn them into a size, so a hand-written approximation leaves `font-size` invalid and
+   the selection boxes stop matching the glyphs. Written out here rather than reconstructed, because
+   reconstructing them is what produced a highlight that spilled over its lines and a tall bar
+   standing in the middle of the page. */
+#lp-pdf .lp-text {
+  color-scheme: only light;
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: transparent;
+  z-index: 1;
+  /* pdf.js multiplies the font size by --min-font-size and scales the elements back by its inverse,
+     so the browser's minimum-font-size floor cannot make the spans disagree with the canvas. */
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+#lp-pdf .lp-text span,
+#lp-pdf .lp-text br {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+#lp-pdf .lp-text > :not(.markedContent),
+#lp-pdf .lp-text .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0; /* set per span by text_layer.js */
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+/* A structural wrapper around tagged content: it must generate NO box of its own. */
+#lp-pdf .lp-text .markedContent {
+  display: contents;
+}
+#lp-pdf .lp-text span[role="img"] {
+  user-select: none;
+  cursor: default;
+}
+/* The selection has to be VISIBLE even though the text is not — the glyphs it covers are painted on
+   the canvas BELOW and never change colour — and visibly NOT the forward-search band, which is why
+   it takes the theme's own selection colour rather than `--lp-link`. A quarter-opaque wash tints the
+   page and leaves the glyphs readable whatever that colour happens to be. */
+#lp-pdf .lp-text ::selection {
+  background: var(--lp-selection, #b6e3ff);
+  background: color-mix(in srgb, var(--lp-selection, #b6e3ff) 28%, transparent);
+}
+/* A SELECTED <br> paints as a tall thin bar in Chrome (pdf.js issue #13840). Upstream carries this
+   exact workaround; without it a selection spanning line breaks draws a column standing in the middle
+   of the page. */
+#lp-pdf .lp-text br::selection {
+  background: transparent;
+}
+#lp-pdf .lp-text .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  user-select: none;
+}
+#lp-pdf .lp-text.lp-selecting .endOfContent {
+  top: 0;
+}
 /* Forward-search flash: a translucent band over the canvas at the producer's coordinates. */
 .lp-synctex {
   position: absolute;

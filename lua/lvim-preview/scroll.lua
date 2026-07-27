@@ -147,18 +147,33 @@ end
 ---@param win integer
 ---@param buf integer
 ---@param line integer  1-based target line
+---@param opts { place: ("top"|"center")?, move: ("view"|"cursor")? }?  overrides `sync_scroll_back`
+---   for a caller that owns its own policy (see `M.place_source`)
 ---@return nil
-local function place_view(win, buf, line)
+local function place_view(win, buf, line, opts)
     local back = config.sync_scroll_back or {}
+    if opts then
+        back = vim.tbl_extend("force", back, opts)
+    end
     local count = api.nvim_buf_line_count(buf)
     local height = api.nvim_win_get_height(win)
-    local top = line
-    if back.place == "center" then
-        top = line - math.floor((height - 1) / 2)
-    end
-    top = math.max(1, math.min(top, count))
+    line = math.max(1, math.min(line, count))
     api.nvim_win_call(win, function()
         local view = vim.fn.winsaveview()
+        local top = line
+        if back.place == "center" then
+            -- CENTRED BY ROW, not by line arithmetic. `line - height/2` assumes one screen row per
+            -- buffer line, which 'wrap' breaks: measured on wrapped prose, that formula leaves the
+            -- requested line 1–9 lines away from the middle row. Two things went wrong with it — the
+            -- view was simply not centred on what it claimed, and the caller's echo suppression
+            -- compares the placed line with the line at the middle row, so they never matched and
+            -- the editor answered its own placement. `zz` is what centres a line by row; only its
+            -- resulting topline is taken, and the cursor is put back below.
+            api.nvim_win_set_cursor(win, { line, 0 })
+            vim.cmd("keepjumps normal! zz")
+            top = vim.fn.line("w0")
+        end
+        top = math.max(1, math.min(top, count))
         view.topline = top
         if back.move == "cursor" then
             view.lnum = line
@@ -272,7 +287,7 @@ function M.attach(doc)
     -- session restore recreate the buffer under a NEW number, and a buffer-scoped autocmd would be
     -- left on the dead handle, silently killing the editor→browser direction until a restart. The
     -- callback re-reads the live bufnr from the event so `doc.bufnr` always names the current buffer.
-    api.nvim_create_autocmd({ "WinScrolled", "CursorMoved", "CursorMovedI" }, {
+    api.nvim_create_autocmd({ "CursorMoved", "CursorMovedI" }, {
         group = grp,
         pattern = doc.file,
         callback = function(ev)
@@ -280,6 +295,81 @@ function M.attach(doc)
             send_scroll(doc)
         end,
     })
+    -- `WinScrolled` is registered SEPARATELY and WITHOUT a pattern, because it does not take a file
+    -- one: the event matches its pattern against the WINDOW ID, so `pattern = doc.file` matches
+    -- nothing at all and the registration silently never fires (measured in a TUI: pattern-less 2
+    -- firings, file pattern 0). It was co-registered with the cursor events here, which is why the
+    -- editor→browser link appeared to work — `CursorMoved` was carrying it alone, and a scroll that
+    -- left the cursor line alone never reached the page. The gate the pattern would have expressed
+    -- is the buffer check inside `send_scroll` (it only acts for the CURRENT buffer).
+    api.nvim_create_autocmd("WinScrolled", {
+        group = grp,
+        callback = function()
+            local buf = api.nvim_get_current_buf()
+            if api.nvim_buf_is_valid(buf) and api.nvim_buf_get_name(buf) == doc.file then
+                doc.bufnr = buf
+                send_scroll(doc)
+            end
+        end,
+    })
+end
+
+--- Scroll every window in the CURRENT tabpage that shows `file` so `line` is in view.
+---
+--- The public half of the inbound path, for a producer whose page reports a position this module
+--- cannot resolve itself. An ARTIFACT is that case: a PDF page knows a point on a page, and only its
+--- producer (lvim-tex, through `synctex edit`) can say which source line that is — but once it has,
+--- "put this line in view without disturbing the user" is the same problem the document path already
+--- solved, and solving it twice is how the two drift apart. So the resolution stays with the
+--- producer and the MOVEMENT stays here, with its three rules intact: move the view and not the
+--- cursor, never focus or open a window, never touch a document that is not on screen.
+---
+--- The caller owns its own anti-oscillation window (it owns the outbound direction too); this
+--- function claims nothing and reports nothing.
+--- Returns the line that ended up AT THE REFERENCE ROW as well as whether anything moved, and the
+--- two are not always the same as the line asked for: with 'wrap' the middle row can belong to the
+--- next buffer line, and near the end of a file there is nothing left to scroll. A caller that
+--- suppresses its own echo has to compare against what HAPPENED, not against what it requested —
+--- otherwise it answers its own placement and the two sides tug at each other.
+---@param file string   absolute path of the source file
+---@param line integer  1-based
+---@param opts { place: ("top"|"center")?, move: ("view"|"cursor")? }?  defaults to `sync_scroll_back`
+---@return boolean moved, integer? at  false when no window in this tabpage shows the file
+function M.place_source(file, line, opts)
+    local target = vim.fs.normalize(vim.fn.fnamemodify(file, ":p"))
+    local buf = nil
+    for _, b in ipairs(api.nvim_list_bufs()) do
+        local name = api.nvim_buf_get_name(b)
+        if name ~= "" and vim.fs.normalize(name) == target then
+            buf = b
+            break
+        end
+    end
+    if not buf or not api.nvim_buf_is_valid(buf) then
+        return false
+    end
+    local wins = visible_windows(buf)
+    if #wins == 0 then
+        return false
+    end
+    line = math.max(1, math.min(line, api.nvim_buf_line_count(buf)))
+    for _, win in ipairs(wins) do
+        place_view(win, buf, line, opts)
+    end
+    -- Where the FIRST window actually came to rest, measured the same way a follow measures it.
+    local at
+    local back = vim.tbl_extend("force", config.sync_scroll_back or {}, opts or {})
+    api.nvim_win_call(wins[1], function()
+        if back.place == "center" then
+            local view = vim.fn.winsaveview()
+            vim.cmd("keepjumps normal! M")
+            at = vim.fn.line(".")
+            vim.fn.winrestview(view)
+        else
+            at = vim.fn.line("w0")
+        end
+    end)
+    return true, at
 end
 
 --- Remove ONE document's sync-scroll autocmds.

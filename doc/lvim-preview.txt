@@ -267,6 +267,34 @@ Enabling this is a deliberate relaxation of the passive-viewer rule
 `scroll_source`, only for a previewed markdown/org document. Everything else a
 page might send is still discarded.
 
+                                                  *lvim-preview-scroll-artifact*
+AN ARTIFACT REPORTS TOO, DIFFERENTLY
+
+A pdf ARTIFACT page has no source lines to report, so it sends what it does
+know — the point on the page at a configurable viewport ANCHOR (its CENTRE
+by default: a page opens with a margin, and a lookup there resolves to
+whatever record is nearest rather than to what is being read) — as
+`synctex_scroll`,
+under `artifact.allow_client_messages` rather than this flag. Turning that into
+a place in the source is SyncTeX's answer to give, and belongs to the producer
+that owns the `.synctex.gz` (lvim-tex does exactly this).
+
+Once the producer HAS a file and a line, "put it in view without disturbing the
+user" is the same problem solved above, so it is not solved twice: >lua
+    require("lvim-preview.scroll").place_source(file, line, {
+        place = "top",   -- or "center"
+        move  = "view",  -- or "cursor"
+    })
+<
+While the anchor is in the GAP between two pages the page reports NOTHING: a gap
+has no content to read, and the only positions available there are the page
+edges, which are margin.
+
+It scrolls every window in the CURRENT tabpage showing that file, moves the view
+and not the cursor, never focuses or opens anything, and returns false when the
+file is not on screen. The caller owns its own settle window, since it owns the
+outbound direction as well.
+
 PRECISION IS BLOCK-LEVEL                          *lvim-preview-scroll-limit*
 
 The anchors are BLOCKS, so the exact line is only known at a block boundary.

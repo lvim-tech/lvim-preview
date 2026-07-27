@@ -246,6 +246,103 @@
     }
   }
 
+  // ---- artifact: report where the reader is (pdf -> producer) ---------------
+  // The document reporter above answers "which SOURCE LINE is at the top"; an artifact has no
+  // source lines, so this one answers the only thing a PDF page knows: WHICH POINT of which page is
+  // at the top of the viewport. Turning that into a place in the source is SyncTeX's job and belongs
+  // to the producer, which owns the .synctex.gz — the page must not pretend to know.
+  //
+  // Gated on the same `allow_client_messages` as ctrl-click inverse search: one switch for "this
+  // page may talk back". Whether the frames are acted upon is the producer's decision, not ours.
+  //
+  // The same two anti-oscillation guards as the document path, for the same reasons: a quiet window
+  // after the producer scrolled us (so its own scroll is not reported straight back), and never
+  // sending a position equal to the last one sent.
+  var artBack = { quietUntil: 0, last: 0, timer: null, lastKey: "" };
+  // Both are POLICY, and the document link already exposes its equivalents — a hardcoded pair here
+  // is how the two halves of one link drift into disagreeing about timing, which is exactly the
+  // shape of the echo regression this file already carries scar tissue from. Correctness does not
+  // rest on the numbers matching (value and generation guards do that), but the policy has to be
+  // inspectable and tunable.
+  function artThrottle() {
+    return typeof ART.scroll_throttle === "number" ? ART.scroll_throttle : 80;
+  }
+  function artSettle() {
+    return typeof ART.scroll_settle === "number" ? ART.scroll_settle : 400;
+  }
+
+  /**
+   * Where the reader is, as the page that CONTAINS the anchor line and the offset into it.
+   *
+   * NOT the top edge of the viewport, and that is the whole precision of this direction. A typeset
+   * page opens with a margin — on A4 the first ~170 PDF points carry nothing — and a point in a
+   * margin has no text under it, so the producer's SyncTeX lookup snaps to whatever record is
+   * nearest by its own metric, which is routinely a paragraph on another page. The top edge sits in
+   * that margin through the whole of every page transition; the anchor (the viewport centre by
+   * default) only does while a boundary crosses the middle of the screen.
+   *
+   * The offset is CLAMPED into the page as well: pages are separated by a visual gap, and with the
+   * reference point inside it the old code picked the page BELOW and reported a negative offset —
+   * a coordinate that cannot mean anything to SyncTeX.
+   */
+  function anchorPosition() {
+    var f = typeof ART.scroll_anchor === "number" ? ART.scroll_anchor : 0.5;
+    var anchorY = window.innerHeight * Math.min(1, Math.max(0, f));
+    var pages = document.querySelectorAll("#lp-pdf .lp-page");
+    for (var i = 0; i < pages.length; i++) {
+      var r = pages[i].getBoundingClientRect();
+      if (r.top <= anchorY && r.bottom > anchorY) {
+        return { page: i + 1, offset: anchorY - r.top, height: r.height };
+      }
+    }
+    // The anchor is in the GAP between two pages (or off either end): report NOTHING. A gap has no
+    // content to read, and the only positions available there are the page EDGES — which is where a
+    // typeset page's margin is, the one band whose lookup resolves to an arbitrary paragraph. The
+    // previous mid-page report simply stays current for the fraction of a second a boundary takes to
+    // cross the anchor; reporting an edge instead is what made the source jump to the foot of the
+    // page and snap back on every page transition.
+    return null;
+  }
+
+  function reportArtifactScroll() {
+    if (!ART || CFG.kind !== "pdf" || !ART.allow_client_messages) return;
+    if (Date.now() < artBack.quietUntil) return;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
+    var pos = anchorPosition();
+    if (!pos) return;
+    // PDF points from the page's top-left — the same contract as the inbound `synctex` frame, so a
+    // round trip through the producer is symmetric. The page is laid out at `scale` CSS px per PDF
+    // point, so dividing by it is the whole conversion.
+    var y = Math.max(0, Math.min(pos.offset, pos.height)) / pdf.scale;
+    var x = typeof ART.scroll_x === "number" ? ART.scroll_x : 40;
+    var key = pos.page + ":" + Math.round(y);
+    if (key === artBack.lastKey) return;
+    // Marked delivered only once it HAS been: `readyState` can change between the check above and
+    // the call, and `send` can throw. Recording the key first would retire a position that never
+    // left, and nothing would resend it until the anchor moved again.
+    try {
+      socket.send(JSON.stringify({ type: "synctex_scroll", path: CFG.path, page: pos.page, x: x, y: y }));
+      artBack.lastKey = key;
+    } catch (e) {
+      /* not delivered: leave the baseline alone so the next tick retries */
+    }
+  }
+
+  function onArtifactScroll() {
+    var now = Date.now();
+    var wait = artThrottle() - (now - artBack.last);
+    if (wait <= 0) {
+      artBack.last = now;
+      reportArtifactScroll();
+    } else if (!artBack.timer) {
+      artBack.timer = setTimeout(function () {
+        artBack.timer = null;
+        artBack.last = Date.now();
+        reportArtifactScroll();
+      }, wait);
+    }
+  }
+
   // ---- artifact: producer status overlay ------------------------------------
   // "building" keeps the LAST GOOD render visible under a corner chip — a build takes seconds
   // and blanking the page for each one would make the viewer useless. "error" adds a strip with
@@ -279,7 +376,8 @@
   // pdf.js is loaded as an ES module by an inline bootstrap in the shell, which hangs the
   // namespace on window.pdfjsLib and fires "lp-pdfjs". Both orders are handled: the flag may
   // already be set by the time this deferred script runs.
-  // pdf.pages[i] = { num, page (proxy), wrap (div), vp (viewport), canvas (or null), task (or null) }.
+  // pdf.pages[i] = { num, page (proxy), wrap (div), vp (viewport), canvas, task, text (the selectable
+  // text-layer div), textLayer (its pdf.js object) } — everything after `vp` is null while unpainted.
   // A page's wrap is a correctly-SIZED placeholder from load; `canvas` exists only while the page
   // is painted (see the lazy machinery below).
   var pdf = { doc: null, scale: 1.25, loading: false, pages: [], observer: null };
@@ -312,11 +410,23 @@
     return capturePosition().page - 1;
   }
 
+  /**
+   * Put the reader back where they were after a re-layout — a producer reload, or a zoom.
+   *
+   * THIS IS NOT THE READER SCROLLING, and the difference is not cosmetic: the scroll events it
+   * raises are indistinguishable from a real one, so without the quiet window a successful BUILD
+   * would report a position and move the editor's source, purely because the PDF was re-rendered.
+   * The dedupe baseline is reset from where we land rather than sent, so the next genuine scroll is
+   * measured against the restored position instead of the pre-layout one.
+   */
   function restorePosition(pos) {
     if (!pos) return;
     var p = pdf.pages[pos.page - 1];
     if (!p) return;
+    artBack.quietUntil = Date.now() + artSettle();
     window.scrollTo({ top: p.wrap.offsetTop + pos.offset, behavior: "auto" });
+    var here = anchorPosition();
+    artBack.lastKey = here ? here.page + ":" + Math.round(Math.max(0, Math.min(here.offset, here.height)) / pdf.scale) : "";
   }
 
   // ---- lazy page machinery -------------------------------------------------
@@ -342,6 +452,39 @@
       canvasContext: canvas.getContext("2d"),
       viewport: p.page.getViewport({ scale: pdf.scale * dpr }),
     });
+    // THE PAGE IS SELECTABLE ONLY BECAUSE OF THIS. A canvas is pixels: it carries no text, so
+    // nothing on it can be selected, searched with the browser's own find, or copied. pdf.js's
+    // TextLayer is the mechanism for that — transparent, absolutely positioned spans laid over the
+    // canvas at the glyph positions — and it is rendered per page, released with the canvas.
+    //
+    // Its viewport is the CSS one (`pdf.scale`), not the canvas's device-pixel viewport: the spans
+    // are laid out in CSS pixels against `--total-scale-factor` on the wrap.
+    if (window.pdfjsLib && window.pdfjsLib.TextLayer) {
+      var tdiv = document.createElement("div");
+      tdiv.className = "lp-text";
+      p.wrap.appendChild(tdiv);
+      p.text = tdiv;
+      try {
+        p.textLayer = new window.pdfjsLib.TextLayer({
+          textContentSource: p.page.streamTextContent(),
+          container: tdiv,
+          viewport: p.page.getViewport({ scale: pdf.scale }),
+        });
+        p.textLayer.render().catch(function () {});
+        // The `.endOfContent` marker is NOT created by the low-level TextLayer we use — pdf.js's own
+        // viewer component makes it, and everything that depends on it (a highlight running to the
+        // edge of a justified line; a drag into empty space not swallowing the rest of the page)
+        // lives in that component. So the element is created here and driven by `bindSelection`.
+        var endDiv = document.createElement("div");
+        endDiv.className = "endOfContent";
+        tdiv.append(endDiv);
+        p.endOfContent = endDiv;
+        textLayers.set(tdiv, endDiv);
+        bindSelection();
+      } catch (e) {
+        p.textLayer = null;
+      }
+    }
     p.task.promise.then(
       function () {
         p.task = null;
@@ -355,8 +498,119 @@
     );
   }
 
+  // ---- text selection across the pages ---------------------------------------
+  // Ported from pdf.js's own TextLayerBuilder, because the behaviour lives THERE and not in the
+  // TextLayer class this file uses. Two things depend on it:
+  //
+  //   * a highlight that runs to the edge of a justified line instead of stopping at its last glyph
+  //     (that is what the `.endOfContent` marker, lifted to cover the layer while a drag is in
+  //     progress, is for);
+  //   * a drag that wanders into the MARGIN not swallowing everything down to the end of the page.
+  //     Outside Firefox, hovering empty space means hovering `.endOfContent`, and the browser then
+  //     extends the selection all the way to it. Moving that element to sit right beside the end the
+  //     user is dragging bounds the jump to the span being modified — which is the whole trick, and
+  //     it cannot be expressed in CSS.
+  var textLayers = new Map();
+  var selectionBound = false;
+
+  function resetLayer(endDiv, layer) {
+    if (endDiv) {
+      layer.append(endDiv);
+      endDiv.style.width = "";
+      endDiv.style.height = "";
+    }
+    layer.classList.remove("lp-selecting");
+  }
+
+  function bindSelection() {
+    if (selectionBound) return;
+    selectionBound = true;
+    var pointerDown = false;
+    var prevRange = null;
+    var resetAll = function () {
+      textLayers.forEach(function (endDiv, layer) {
+        resetLayer(endDiv, layer);
+      });
+    };
+    document.addEventListener("pointerdown", function () {
+      pointerDown = true;
+    });
+    document.addEventListener("pointerup", function () {
+      pointerDown = false;
+      resetAll();
+    });
+    window.addEventListener("blur", function () {
+      pointerDown = false;
+      resetAll();
+    });
+    document.addEventListener("keyup", function () {
+      if (!pointerDown) resetAll();
+    });
+    document.addEventListener("selectionchange", function () {
+      var selection = document.getSelection();
+      if (!selection || selection.rangeCount === 0) {
+        resetAll();
+        return;
+      }
+      var active = new Set();
+      for (var i = 0; i < selection.rangeCount; i++) {
+        var r = selection.getRangeAt(i);
+        textLayers.forEach(function (_end, layer) {
+          if (!active.has(layer) && r.intersectsNode(layer)) active.add(layer);
+        });
+      }
+      textLayers.forEach(function (endDiv, layer) {
+        if (active.has(layer)) layer.classList.add("lp-selecting");
+        else resetLayer(endDiv, layer);
+      });
+
+      var range = selection.getRangeAt(0);
+      // Which END is being dragged: if this range shares its end with the previous one, the user is
+      // moving the START. The marker goes on that side, so the bounded jump is on the side that moves.
+      var modifyStart =
+        prevRange &&
+        (range.compareBoundaryPoints(Range.END_TO_END, prevRange) === 0 ||
+          range.compareBoundaryPoints(Range.START_TO_END, prevRange) === 0);
+      var anchorNode = modifyStart ? range.startContainer : range.endContainer;
+      if (anchorNode.nodeType === Node.TEXT_NODE) anchorNode = anchorNode.parentNode;
+      if (!modifyStart && range.endOffset === 0) {
+        try {
+          do {
+            while (!anchorNode.previousSibling) anchorNode = anchorNode.parentNode;
+            anchorNode = anchorNode.previousSibling;
+          } while (!anchorNode.childNodes.length);
+        } catch (e) {
+          anchorNode = null;
+        }
+      }
+      var parentLayer = anchorNode && anchorNode.parentElement && anchorNode.parentElement.closest(".lp-text");
+      var endDiv = parentLayer && textLayers.get(parentLayer);
+      if (endDiv) {
+        endDiv.style.width = parentLayer.style.width;
+        endDiv.style.height = parentLayer.style.height;
+        endDiv.style.userSelect = "text";
+        anchorNode.parentElement.insertBefore(endDiv, modifyStart ? anchorNode : anchorNode.nextSibling);
+      }
+      prevRange = range.cloneRange();
+    });
+  }
+
   /** Drop page `p`'s canvas (cancelling an in-flight render) and free its backing bitmap. */
   function releaseCanvas(p) {
+    // The text layer belongs to the painted page: a released placeholder shows nothing, so leaving
+    // its spans behind would keep selectable text floating over a blank page.
+    if (p.textLayer) {
+      try {
+        if (typeof p.textLayer.cancel === "function") p.textLayer.cancel();
+      } catch (e) {}
+      p.textLayer = null;
+    }
+    if (p.text) {
+      textLayers.delete(p.text);
+      if (p.text.parentNode) p.text.parentNode.removeChild(p.text);
+      p.text = null;
+      p.endOfContent = null;
+    }
     if (p.task) {
       try {
         p.task.cancel();
@@ -434,8 +688,12 @@
             wrap.setAttribute("data-page", String(num));
             wrap.style.width = vp.width + "px";
             wrap.style.height = vp.height + "px";
+            // pdf.js sizes and positions the text layer against this custom property, so it must
+            // carry the CSS scale (not the device-pixel one the canvas is painted at). Set on the
+            // wrap at layout, which zooming redoes wholesale — so the text stays over its glyphs.
+            wrap.style.setProperty("--total-scale-factor", String(pdf.scale));
             frag.appendChild(wrap);
-            pdf.pages[num - 1] = { num: num, page: page, wrap: wrap, vp: vp, canvas: null, task: null };
+            pdf.pages[num - 1] = { num: num, page: page, wrap: wrap, vp: vp, canvas: null, task: null, text: null, textLayer: null, endOfContent: null };
           });
         });
       })(n);
@@ -546,6 +804,10 @@
   function synctexTo(msg) {
     var el = document.querySelector('#lp-pdf .lp-page[data-page="' + msg.page + '"]');
     if (!el) return;
+    // The producer is moving us: the scroll events this causes are ours-because-of-it and must not
+    // be reported back. Set BEFORE the scroll, and not extended by the events it produces, so
+    // control returns to the reader after one quiet interval.
+    artBack.quietUntil = Date.now() + artSettle();
     ensureRendered(msg.page);
     clearSynctex();
     // `0` means NO band — scroll there and leave the page alone. Resolved with explicit null checks
@@ -601,7 +863,11 @@
   var wasConnected = false;
   function wsUrl() {
     var proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return proto + "//" + window.location.host + "/";
+    // Upgrade on the page's OWN path, not on "/": that is what lets the server know which document
+    // or artifact this socket belongs to and send it only what concerns it. Connecting to the root
+    // made every client a subscriber to everything, and the filtering happened here — after the
+    // metadata had already crossed the network.
+    return proto + "//" + window.location.host + window.location.pathname;
   }
   function pathMatches(p) {
     if (!p) return true;
@@ -618,6 +884,9 @@
     }
   }
   function connect() {
+    // A new socket has delivered nothing yet: the dedupe baseline describes a conversation that no
+    // longer exists.
+    artBack.lastKey = "";
     socket = new WebSocket(wsUrl());
     socket.onopen = function () {
       if (wasConnected) {
@@ -695,9 +964,12 @@
     } else if (CFG.kind !== "html") {
       render(initialText(), CFG.server_rendered === true);
     }
-    // Only a DOCUMENT page reports scrolls: an artifact has no source lines to report.
+    // A DOCUMENT page reports source lines; a pdf ARTIFACT page reports a point on a page, which
+    // only its producer can turn into a place in the source. Different reporters, same throttle.
     if (BACK && !ART && content) {
       window.addEventListener("scroll", onPageScroll, { passive: true });
+    } else if (ART && CFG.kind === "pdf" && ART.allow_client_messages) {
+      window.addEventListener("scroll", onArtifactScroll, { passive: true });
     }
     connect();
     // Reconnect poll: if the socket dropped, try again (onopen reloads the page).

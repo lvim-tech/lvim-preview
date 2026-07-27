@@ -30,6 +30,7 @@ local MAX_HEAD = 32 * 1024
 ---@class LvimPreviewClientCtx
 ---@field tcp uv.uv_tcp_t   the accepted socket
 ---@field upgraded boolean  true once the WebSocket handshake completed
+---@field path string?      the preview/artifact path this socket upgraded on; nil = subscribes to all
 ---@field buf string        pending bytes (HTTP head before upgrade, then WS frame remainder)
 
 --- Schedule-safe notify (never call vim.notify directly from a fast callback).
@@ -146,6 +147,15 @@ local function on_http_bytes(ctx, chunk)
         ctx.tcp:write(response)
         ctx.upgraded = true
         ctx.buf = ""
+        -- The path the page upgraded ON is this socket's identity: a client is a viewer OF something,
+        -- and without recording that every client received every other document's traffic and threw
+        -- most of it away in JavaScript — after it had crossed the network. Nil for a client that
+        -- upgraded on "/" (an older page), which `broadcast` treats as "send it everything", so a
+        -- mixed-version session degrades to the previous behaviour rather than going silent.
+        ctx.path = http.request_path(request)
+        if ctx.path == "/" then
+            ctx.path = nil
+        end
         state.clients[#state.clients + 1] = ctx
         notify(("browser connected (%d client%s)"):format(#state.clients, #state.clients == 1 and "" or "s"))
     else
@@ -351,6 +361,9 @@ end
 --- Broadcast a JSON message to every connected client. A write failure drops that client.
 --- `except` (a client ctx) is skipped — used to fan a browser-originated scroll out to the OTHER
 --- viewers without echoing it back to the one the reader is actively scrolling.
+--- A message carrying a `path` is ROUTED to the clients viewing it; one without a path (a theme
+--- change, a server-wide notice) still goes to everyone. A client that upgraded without a path of
+--- its own receives everything, which is what an older page expects.
 ---@param message table
 ---@param except LvimPreviewClientCtx?  a client to skip
 function M.broadcast(message, except)
@@ -360,8 +373,9 @@ function M.broadcast(message, except)
     local frame = websocket.json_frame(message)
     -- iterate a copy: drop_client mutates state.clients
     local snapshot = vim.list_slice(state.clients, 1, #state.clients)
+    local scope = type(message.path) == "string" and message.path or nil
     for _, ctx in ipairs(snapshot) do
-        if ctx ~= except then
+        if ctx ~= except and (scope == nil or ctx.path == nil or ctx.path == scope) then
             local ok = pcall(function()
                 ctx.tcp:write(frame)
             end)

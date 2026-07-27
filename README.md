@@ -62,6 +62,20 @@ so the browser tracks your theme.
     into a window that is already visible. Nothing is opened, no buffer is switched and the
     current window never changes.
 
+  A pdf **artifact** page reports its reading position the same way, as a `synctex_scroll` message,
+  under the artifact gate above. It carries a point on a page and nothing more: what that means in
+  the source is SyncTeX's answer to give, so the producer resolves it and calls
+  `require("lvim-preview.scroll").place_source(file, line)` — the public half of the inbound path,
+  which moves a visible window's view under exactly the same three rules. The point it reports is a
+  configurable viewport **anchor** (`artifact.pdf.scroll_anchor`, the centre by default — a page
+  opens with a margin, where a lookup resolves to whatever record is nearest rather than to what is
+  being read), and while that anchor sits in the gap between two pages nothing is reported at all.
+
+  Inbound frames are validated **before** a producer sees them: an artifact declares what it accepts
+  (`accepts`, a list of message types or a validator), and a pdf artifact's built-in contract is the
+  two SyncTeX shapes with finite, in-range numbers. A socket also subscribes on the path of the page
+  that opened it, so a client is only sent traffic for what it is actually viewing.
+
   Anything else from a page — a different message type, a message for a document that is not
   previewed, any binary frame — is discarded exactly as it was before either flag existed.
 
@@ -250,7 +264,11 @@ require("lvim-preview").setup({
             highlight_ms = 1200, -- ms a forward-search highlight rect stays visible
             lazy = true, -- render a page only as it nears the viewport; release far canvases
             lookahead = 1, -- pages beyond the viewport (each side) kept painted ahead
-            max_canvases = 8, -- most painted-page canvases retained at once
+            max_canvases = 8,
+            scroll_anchor = 0.5, -- where in the viewport the page calls "here" when reporting
+            scroll_x = 40, -- the x reported with it, PDF points from the page's left edge
+            scroll_throttle = 80, -- ms: at most one report per this while scrolling
+            scroll_settle = 400, -- ms of silence after the producer moved the page, or a re-layout -- most painted-page canvases retained at once
         },
     },
     hud_chip = true, -- show the lvim-hud serving chip while the server runs
@@ -282,7 +300,7 @@ Every block the Markdown and org renderers emit carries the source line it came 
 **Editor → browser** (`sync_scroll`, on by default). Scrolling or moving in a previewed buffer
 sends its top window line; the page jumps to the block that line belongs to.
 
-**Browser → editor** (`sync_scroll_back.enabled`, **off** by default). Scrolling the page reports
+**Browser → editor** (`sync_scroll_back.enabled`, **on** by default). Scrolling the page reports
 the source line at the top of the viewport and the editor follows:
 
 - **The view moves, not the cursor** (`move = "view"`). Scrolling is reading, not editing, so your

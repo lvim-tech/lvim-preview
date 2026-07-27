@@ -371,10 +371,20 @@ local function artifact_cfg(art, kind)
             -- Lazy pdf rendering knobs (see config.artifact.pdf). The viewer paints pages on demand
             -- and caps retained canvases; these drive the IntersectionObserver in client.js.
             lazy = config.artifact.pdf.lazy ~= false,
-            lookahead = config.artifact.pdf.lookahead or 1,
-            max_canvases = config.artifact.pdf.max_canvases or 8,
+            lookahead = config.artifact.pdf.lookahead ~= nil and config.artifact.pdf.lookahead or 1,
+            max_canvases = config.artifact.pdf.max_canvases ~= nil and config.artifact.pdf.max_canvases or 8,
             stall_ms = config.artifact.stall_note_ms,
             allow_client_messages = config.artifact.allow_client_messages == true,
+            -- Where in the viewport the page calls "here" when it reports its reading position, and
+            -- the x it reports with it (see config.artifact.pdf).
+            -- `or default` cannot serialise a deliberate ZERO, and zero is inside both domains: the
+            -- top of the viewport, and the left edge of the page. The client's own
+            -- `typeof … === "number"` handling is unreachable for those values unless the nil test
+            -- is explicit here.
+            scroll_anchor = config.artifact.pdf.scroll_anchor ~= nil and config.artifact.pdf.scroll_anchor or 0.5,
+            scroll_x = config.artifact.pdf.scroll_x ~= nil and config.artifact.pdf.scroll_x or 40,
+            scroll_throttle = config.artifact.pdf.scroll_throttle ~= nil and config.artifact.pdf.scroll_throttle or 80,
+            scroll_settle = config.artifact.pdf.scroll_settle ~= nil and config.artifact.pdf.scroll_settle or 400,
         },
     }))
 end

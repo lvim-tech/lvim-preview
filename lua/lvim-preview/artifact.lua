@@ -49,6 +49,12 @@ local M = {}
 ---                        to know a build finished coherently. true — a uv fs_event on the file's
 ---                        directory reloads on write, debounced by config.artifact.watch_debounce.
 ---@field on_message fun(msg: table)? Opt-in handler for INBOUND viewer messages (inverse search).
+---   The message is UNTRUSTED: it arrives from a browser page, and with the server LAN-bound from
+---   any client that knows the url path. The framework enforces `accepts` before calling this, so a
+---   handler sees only the shapes its artifact declared.
+---@field accepts string[]|fun(msg: table): boolean|nil  which inbound messages this artifact takes:
+---   a list of `type` names, a validator, or nil for the built-in contract (a pdf artifact accepts
+---   `synctex_edit` / `synctex_scroll` with finite page/x/y; anything else accepts everything).
 ---                        Also requires config.artifact.allow_client_messages = true.
 
 -- Viewer inferred from the produced file's extension when the spec does not name one.
@@ -310,6 +316,7 @@ function M.register(spec)
         status = prev and prev.status or { state = "idle" },
         watch = spec.watch == true,
         on_message = type(spec.on_message) == "function" and spec.on_message or nil,
+        accepts = spec.accepts,
     }
     state.artifacts[art.id] = art
     state.artifact_slugs[art.slug] = art
@@ -388,6 +395,46 @@ end
 --- want the editor API. A message that names no registered artifact, or one whose producer
 --- supplied no `on_message`, is dropped — the passive-viewer rule still holds for everything
 --- that did not explicitly opt in.
+--- Does this artifact accept this message?
+---
+--- The gate is a promise about SHAPE, and until now it was one the framework left every producer to
+--- keep for itself. That is the wrong place for it: a WebSocket connection is not tied to the page
+--- it came from, so with the server LAN-bound any connected client can address any registered
+--- artifact by its url path — and a producer that assumed the framework had already checked would be
+--- handed whatever arrived. So the contract is declared per artifact (`accepts`, a list of type
+--- names or a validator) and enforced HERE, once.
+---
+--- The built-in contract for a `viewer = "pdf"` artifact is the two SyncTeX shapes, with their
+--- numbers checked for being finite and in range — NaN and infinity survive JSON decoding, and a
+--- page of `-1` or `1/0` reaches `synctex` as a command-line argument.
+---@param art table  the registry entry (`accepts`, `viewer`, `on_message`)
+---@param msg table  the decoded frame
+---@return boolean
+function M.accepts(art, msg)
+    local contract = art.accepts
+    if type(contract) == "function" then
+        return contract(msg) == true
+    end
+    --- Is `v` a real, finite number?
+    ---@param v any
+    ---@return boolean
+    local function finite(v)
+        return type(v) == "number" and v == v and v ~= math.huge and v ~= -math.huge
+    end
+    if type(contract) == "table" then
+        return type(msg.type) == "string" and vim.tbl_contains(contract, msg.type)
+    end
+    if art.viewer == "pdf" then
+        if msg.type ~= "synctex_edit" and msg.type ~= "synctex_scroll" then
+            return false
+        end
+        return finite(msg.page) and msg.page >= 1 and finite(msg.x) and finite(msg.y)
+    end
+    -- A producer that registered a handler without declaring a contract gets what it always got, and
+    -- the class doc says plainly that it is untrusted input.
+    return true
+end
+
 ---@param payload string  the raw text-frame payload
 ---@return nil
 function M.dispatch_client_message(payload)
@@ -398,6 +445,9 @@ function M.dispatch_client_message(payload)
     local art = state.artifact_for_url(msg.path)
     local handler = art and art.on_message
     if not handler then
+        return
+    end
+    if not art or not M.accepts(art, msg) then
         return
     end
     vim.schedule(function()

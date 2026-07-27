@@ -50,6 +50,12 @@
 ---                                 just below the fold is ready before it scrolls in. Lazy only.
 ---@field max_canvases     integer  most painted-page canvases retained at once (the nearest to the
 ---                                 viewport win); the rest are released and re-rendered on return.
+---@field scroll_anchor    number   where in the viewport "here" is when the page reports its reading
+---                                 position, as a fraction of its height (0.5 = the centre; a page's
+---                                 top edge is margin, where a lookup resolves to nothing useful)
+---@field scroll_x         number   the x reported with it, PDF points from the page's left edge
+---@field scroll_throttle  integer  ms: at most one report per this while scrolling
+---@field scroll_settle    integer  ms of silence after the PRODUCER moved the page, or a re-layout
 ---                                 Keep it ≥ the on-screen page count + 2 × lookahead. Lazy only.
 
 ---@class LvimPreviewExportConfig
@@ -368,6 +374,30 @@ return {
             -- viewport are released (re-rendered on return). Keep ≥ on-screen pages + 2 × lookahead
             -- so nothing visible is ever evicted; the default comfortably covers a full-height page.
             max_canvases = 8,
+            -- WHERE IN THE VIEWPORT "the reader is" means, as a fraction of its height, for the
+            -- position the page reports back to its producer (see `artifact.allow_client_messages`).
+            --
+            -- 0.5 — the centre — rather than the top, and the difference is not cosmetic: a typeset
+            -- page begins with a MARGIN (≈170 pt on A4), and a point in the margin has no text under
+            -- it, so the producer's SyncTeX lookup snaps to whatever record happens to be nearest,
+            -- which can be a paragraph a page away. The top edge sits in that margin for the whole
+            -- of every page transition; the centre only does while a page boundary crosses the
+            -- middle of the screen, which is a far smaller window. The reported offset is also
+            -- CLAMPED into the page, so the gap between two pages can no longer report a negative
+            -- position into the page below it.
+            scroll_anchor = 0.5,
+            -- The horizontal point reported with it, in PDF points from the page's left edge. A
+            -- single-column document answers the same line at any x inside the text block; a
+            -- two-column or margin-notes layout does not, which is why this is an option and not
+            -- the 40 it used to be hardcoded to.
+            scroll_x = 40,
+            -- The page's half of the link's timing. The document link exposes its equivalents in
+            -- `sync_scroll_back`; leaving these hardcoded is how the two halves of one link drift
+            -- into disagreeing, which is the shape of an echo regression. Correctness does not rest
+            -- on the numbers matching — the producer guards by value and generation — but the policy
+            -- has to be inspectable.
+            scroll_throttle = 80, -- ms: at most one report per this while scrolling
+            scroll_settle = 400, -- ms of silence after the PRODUCER moved the page (or a re-layout)
         },
     },
     hud_chip = true,
