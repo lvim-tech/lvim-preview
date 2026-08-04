@@ -119,9 +119,14 @@ end
 --- Browser opener resolvability.
 ---@param h table
 local function check_browser(h)
-    if config.browser and config.browser ~= "" then
-        local cmd = type(config.browser) == "table" and config.browser[1]
-            or vim.split(config.browser, "%s+", { trimempty = true })[1]
+    local browser = config.browser
+    if browser and browser ~= "" then
+        local cmd
+        if type(browser) == "table" then
+            cmd = browser[1]
+        else
+            cmd = vim.split(browser, "%s+", { trimempty = true })[1]
+        end
         if cmd and vim.fn.executable(cmd) == 1 then
             h.ok(("browser opener: %s"):format(cmd))
         else

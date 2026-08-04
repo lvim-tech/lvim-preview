@@ -208,6 +208,16 @@ local function ours_on(host, port)
     local done, result = false, false
     local c = uv.new_tcp()
     local timer = uv.new_timer()
+    if not c or not timer then
+        -- libuv could not allocate a handle: there is nothing to probe with. Close whichever we did get.
+        if c then
+            c:close()
+        end
+        if timer then
+            timer:close()
+        end
+        return false
+    end
     local function finish(v)
         if done then
             return

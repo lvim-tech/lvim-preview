@@ -17,7 +17,6 @@
 local api = vim.api
 local uv = vim.uv
 local config = require("lvim-preview.config")
-local state = require("lvim-preview.state")
 local server = require("lvim-preview.server")
 local template = require("lvim-preview.template")
 
@@ -89,9 +88,13 @@ end
 ---@param doc LvimPreviewDoc
 local function on_text_changed(doc)
     refresh_content(doc)
+    ---@type uv.uv_timer_t?
     local t = timers[doc.file]
     if not t then
         t = uv.new_timer()
+        if not t then
+            return -- libuv could not allocate a timer; drop this push rather than error on a keystroke
+        end
         timers[doc.file] = t
     end
     t:stop()
