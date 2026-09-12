@@ -153,6 +153,10 @@
 ---@field hud_chip   boolean         Show the lvim-hud serving chip while the server runs.
 ---@field notify     boolean         Emit start/stop/port/client vim.notify events.
 ---@field icons      LvimPreviewIcons Nerd Font single-width glyphs.
+---@field picker     LvimPreviewPicker `:LvimPreview pick` scan limits.
+
+---@class LvimPreviewPicker
+---@field depth integer  How many directory levels under the root the picker scans (>= 1).
 
 ---@type LvimPreviewConfig
 return {
@@ -161,11 +165,11 @@ return {
     -- health.lua warns whenever the bound address is non-loopback.
     address = "127.0.0.1",
     port = 5500,
+    -- false = only `port`: a busy port, or one served by another lvim-preview, is a start error.
     auto_port = true,
     -- Only relevant when `address` is non-loopback (you deliberately bind the LAN, e.g. to open the
     -- preview on a phone). A loopback bind is silent — nothing here fires. `warn` surfaces the no-auth
     -- exposure loudly at start (not only in :checkhealth) with the reachable URL(s); `qr` also pops a
-    -- false = only `port`: a busy port, or one served by another lvim-preview, is a start error.
     -- scannable QR of that URL so a phone opens the preview without typing an IP (`:LvimPreview qr`
     -- shows it on demand at any time). Both default on, so exposing the LAN is never silent.
     lan = { warn = true, qr = true },
@@ -404,6 +408,9 @@ return {
     },
     hud_chip = true,
     notify = true,
+    -- `:LvimPreview pick` walks the root this many directory levels deep (heavy/hidden dirs are
+    -- pruned whole). Raise it for a deep docs tree; lower it for a huge monorepo.
+    picker = { depth = 8 },
     icons = {
         server = "", -- nf-fa-server
         file = "󰈙", -- nf-md-file_document

@@ -36,7 +36,7 @@ local function icon_for(path)
     return (config.icons and config.icons.file) or ""
 end
 
---- Scan the root for previewable files (bounded depth, skipping heavy/hidden dirs).
+--- Scan the root for previewable files (bounded by `config.picker.depth`, skipping heavy/hidden dirs).
 ---@param root string
 ---@return { label: string, path: string }[]
 local function scan(root)
@@ -59,8 +59,10 @@ local function scan(root)
         end
         return true
     end
+    local depth = tonumber(config.picker and config.picker.depth) or 8
+    depth = math.max(1, math.floor(depth))
     local ok = pcall(function()
-        for name, kind in vim.fs.dir(root, { depth = 8, skip = skip }) do
+        for name, kind in vim.fs.dir(root, { depth = depth, skip = skip }) do
             if kind == "file" then
                 local ext = name:match("%.([%w]+)$")
                 if ext and exts[ext:lower()] then

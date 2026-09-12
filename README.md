@@ -276,6 +276,7 @@ require("lvim-preview").setup({
     },
     hud_chip = true, -- show the lvim-hud serving chip while the server runs
     notify = true, -- emit start / stop / port / client notifications
+    picker = { depth = 8 }, -- how many directory levels `:LvimPreview pick` scans under the root
     icons = { -- Nerd Font single-width glyphs
         server = "", -- serving chip / status
         file = "󰈙", -- fallback document glyph (lvim-icons wins per file)

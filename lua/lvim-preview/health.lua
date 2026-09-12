@@ -282,6 +282,10 @@ local function check_config(h)
             h.error(("sync_scroll_back.%s must be a number >= 0 (got %s)"):format(key, vim.inspect(back[key])))
         end
     end
+    local pd = config.picker and config.picker.depth
+    if type(pd) ~= "number" or pd < 1 then
+        h.error(("picker.depth must be a number >= 1 (got %s)"):format(vim.inspect(pd)))
+    end
 
     -- Static export (:LvimPreview export). embed decides conditional vs forced inlining; dir, when
     -- set, must be a directory the export can write into.

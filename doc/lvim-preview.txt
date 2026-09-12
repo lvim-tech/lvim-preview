@@ -147,6 +147,7 @@ its default:
       },
       hud_chip = true,        -- lvim-hud serving chip while running
       notify = true,          -- start/stop/port/client notifications
+      picker = { depth = 8 }, -- directory levels :LvimPreview pick scans
       icons = {               -- Nerd Font single-width glyphs
           server = "",
           file = "󰈙",
