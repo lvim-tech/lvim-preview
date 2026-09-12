@@ -104,8 +104,11 @@ function M.ensure(port, on_url)
         end)
     end
 
-    -- Never leave an orphan tunnel behind when Neovim quits.
+    -- Never leave an orphan tunnel behind when Neovim quits. One autocmd, re-created in a cleared
+    -- group: every ensure after a stop used to add another (harmless, all calling the idempotent
+    -- stop, but they accumulated for the session).
     vim.api.nvim_create_autocmd("VimLeavePre", {
+        group = vim.api.nvim_create_augroup("LvimPreviewTunnel", { clear = true }),
         once = true,
         callback = function()
             M.stop()
