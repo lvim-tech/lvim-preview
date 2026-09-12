@@ -253,7 +253,11 @@ local function check_config(h)
     end
     local back = config.sync_scroll_back or {}
     if back.enabled then
-        h.warn(
+        -- The shipped default (window view, cursor untouched) is a note, not a warning — every fresh
+        -- install would otherwise show a WARN for a documented default. Moving the CURSOR from a
+        -- page scroll is the intrusive variant and stays a warning.
+        local report = back.move == "cursor" and h.warn or h.info
+        report(
             (
                 "sync_scroll_back is ON — a previewed page may scroll the editor window showing its "
                 .. "document (move = %s, place = %s, throttle = %sms, settle = %sms). Only the "
