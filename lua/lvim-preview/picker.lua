@@ -44,19 +44,33 @@ local function scan(root)
     -- offers is by construction a file `preview_file` and the HTTP router will accept.
     local exts = util.enabled_exts()
     local out = {}
+    -- Prune at the DIRECTORY, not the file: a skipped name (`node_modules`, `.git`, …) counts at ANY
+    -- depth — the old test read only the top segment of each file path, so `sub/node_modules/x.md`
+    -- was offered while `node_modules/x.md` was not — and a pruned tree is never walked at all,
+    -- rather than walked eight levels deep and thrown away file by file. Hidden directories follow
+    -- `serve_hidden` the same way (hidden FILES are still filtered below).
+    local function skip(dir)
+        local base = dir:match("([^/]+)$") or dir
+        if SKIP_DIR[base] then
+            return false
+        end
+        if not config.serve_hidden and base:sub(1, 1) == "." then
+            return false
+        end
+        return true
+    end
     local ok = pcall(function()
-        for name, kind in vim.fs.dir(root, { depth = 8 }) do
+        for name, kind in vim.fs.dir(root, { depth = 8, skip = skip }) do
             if kind == "file" then
                 local ext = name:match("%.([%w]+)$")
                 if ext and exts[ext:lower()] then
                     -- name is root-relative already (vim.fs.dir with depth returns nested paths)
-                    local top = name:match("^([^/]+)/")
                     -- Dotfiles follow `serve_hidden` — the ONE switch for both sides, so what the
                     -- picker offers is always what the server will serve. A hidden segment counts
                     -- ANYWHERE in the path: the old test (`/%.`) only saw a dot AFTER a slash, so a
                     -- top-level hidden dir (`.github/README.md`) slipped into the list and 404'd.
                     local hidden = name:match("^%.") ~= nil or name:match("/%.") ~= nil
-                    if not (top and SKIP_DIR[top]) and (config.serve_hidden or not hidden) then
+                    if config.serve_hidden or not hidden then
                         out[#out + 1] = { label = name, path = vim.fs.normalize(root .. "/" .. name) }
                     end
                 end
