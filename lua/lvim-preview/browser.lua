@@ -15,9 +15,19 @@ local M = {}
 function M.open(url, browser)
     if browser == nil or browser == "" then
         -- Native platform opener (handles Linux/macOS/Windows selection itself).
-        -- Through the shared opener: `vim.ui.open` signals a missing handler by RETURNING `nil, err`
-        -- rather than raising, so neither a bare `pcall` status nor its second value is the answer.
-        local opened, why = require("lvim-utils.utils").open_url(url)
+        -- Through the shared opener when lvim-utils is installed: `vim.ui.open` signals a missing
+        -- handler by RETURNING `nil, err` rather than raising, so neither a bare `pcall` status nor its
+        -- second value is the answer. lvim-utils is OPTIONAL for this plugin (README, health), so its
+        -- absence falls back to `vim.ui.open` directly instead of failing the whole `start`.
+        local opened, why
+        local ok_utils, utils = pcall(require, "lvim-utils.utils")
+        if ok_utils and type(utils.open_url) == "function" then
+            opened, why = utils.open_url(url)
+        else
+            local ok_open, obj, err = pcall(vim.ui.open, url)
+            opened = ok_open and obj ~= nil
+            why = ok_open and err or tostring(obj)
+        end
         if not opened then
             vim.notify("lvim-preview: could not open the browser: " .. (why or "?"), vim.log.levels.WARN)
         end
