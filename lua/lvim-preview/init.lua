@@ -439,9 +439,6 @@ function M.artifact(id)
     return artifact.handle(id)
 end
 
---- Re-open the browser: the current buffer's document when it is previewed, else the first
---- document, else the first registered artifact (a server may be serving only artifacts).
----@return nil
 --- Open a served page in the browser. With no argument: the current buffer's preview (or the first
 --- document, else the first artifact). With an artifact `id`: that artifact — the addressable half
 --- of `artifacts` below, so a producer-registered document (a built PDF, an HTML render) is reachable

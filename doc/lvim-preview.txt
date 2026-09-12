@@ -139,6 +139,10 @@ its default:
               lazy = true,       -- render pages as they near the viewport
               lookahead = 1,     -- pages painted ahead each side
               max_canvases = 8,  -- retained painted-page canvases
+              scroll_anchor = 0.5, -- viewport fraction the page reports as "here"
+              scroll_x = 40,       -- the x reported with it (PDF points from the left)
+              scroll_throttle = 80, -- ms: at most one report per this while scrolling
+              scroll_settle = 400,  -- ms of silence after the producer moved the page
           },
       },
       hud_chip = true,        -- lvim-hud serving chip while running
@@ -707,16 +711,18 @@ LIVE UPDATES                                      *lvim-preview-theme-live*
     moment the request is handed to the serve path, so a pipelined second
     request can never drive a second response on a closing socket. A request
     head that never terminates is capped at 32 KB and refused with 431.
-  - The browser never drives the editor unless a flag says it may: inbound
-    WebSocket traffic is limited to ping / pong / close, and the page is a
-    passive viewer. There are exactly two opt-in relaxations, each off by
-    default, each with its own flag and its own single accepted message:
-      * `artifact.allow_client_messages` — inverse search on a build artifact,
-        gated twice (it also needs that artifact's own `on_message` handler);
-        see |lvim-preview-artifacts|.
-      * `sync_scroll_back.enabled` — browser->editor sync scroll for a previewed
-        markdown/org document, applied only to a window that is already visible;
-        see |lvim-preview-scroll-back|.
+  - The browser never drives the editor beyond two narrow, separately gated
+    messages: every other inbound WebSocket frame is limited to ping / pong /
+    close, and the page is a passive viewer. Each relaxation has its own flag
+    and its own single accepted message:
+      * `artifact.allow_client_messages` (OFF by default) — inverse search on a
+        build artifact, gated twice (it also needs that artifact's own
+        `on_message` handler); see |lvim-preview-artifacts|.
+      * `sync_scroll_back.enabled` (ON by default; set false to turn it off) —
+        browser->editor sync scroll for a previewed markdown/org document,
+        applied only to a window that is already visible; see
+        |lvim-preview-scroll-back|. :checkhealth names it as the one
+        relaxation active out of the box.
     Anything else a page sends — another message type, a message for something
     that is not being served, any binary frame — is discarded as it always was.
   - Teardown is complete on stop / VimLeavePre — every client handle, every

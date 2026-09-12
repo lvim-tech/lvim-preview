@@ -26,8 +26,9 @@ so the browser tracks your theme.
   frame carries finished HTML, so the page replaces its content in place and never reloads.
 - **KaTeX** math (with your own macros and optional `mhchem` chemistry), **Mermaid** diagrams,
   **highlight.js** code blocks — all client-side, all vendored.
-- **Sync scrolling both ways** — editor→browser always, browser→editor when you opt in. Every
-  block carries the source line it came from, so neither direction guesses.
+- **Sync scrolling both ways** — editor→browser always, browser→editor on by default
+  (`sync_scroll_back.enabled = false` turns it off). Every block carries the source line it came
+  from, so neither direction guesses.
 - **Markdown and org are rendered in Lua, inside Neovim** — no JavaScript parser on the page. The
   Markdown renderer matches 644 of the 652 CommonMark 0.31.2 conformance examples byte-for-byte
   (7 of the other 8 render identically in a browser), plus GFM tables and strikethrough.
@@ -52,15 +53,17 @@ so the browser tracks your theme.
   QR so a phone opens the preview without typing an IP (both governed by the `lan` config).
 - **Path-traversal guarded** — every request is resolved on a segment stack that can never
   escape the root; no directory listings; dotfiles are served (set `serve_hidden = false` to hide them).
-- **The browser never drives the editor unless you say so** — inbound WebSocket traffic is
-  limited to ping / pong / close, and the page is a passive viewer. There are exactly two opt-in
-  relaxations, each with its own flag, off by default, and each accepting only its own message:
-  - **inverse search** on a build artifact — needs `artifact.allow_client_messages = true` **and**
-    an `on_message` handler in that artifact's own registration;
-  - **browser→editor sync scroll** — needs `sync_scroll_back.enabled = true`; only the
-    `scroll_source` message is accepted, only for a previewed Markdown/org document, and only
-    into a window that is already visible. Nothing is opened, no buffer is switched and the
-    current window never changes.
+- **The browser never drives the editor beyond two narrow, separately gated messages** — every
+  other inbound WebSocket frame is limited to ping / pong / close, and the page is a passive
+  viewer. Each relaxation has its own flag and accepts only its own message:
+  - **inverse search** on a build artifact — **off by default**; needs
+    `artifact.allow_client_messages = true` **and** an `on_message` handler in that artifact's own
+    registration;
+  - **browser→editor sync scroll** — **on by default** (`sync_scroll_back.enabled = false` turns
+    it off); only the `scroll_source` message is accepted, only for a previewed Markdown/org
+    document, and only into a window that is already visible. Nothing is opened, no buffer is
+    switched and the current window never changes. `:checkhealth lvim-preview` names it as the
+    one relaxation active out of the box.
 
   A pdf **artifact** page reports its reading position the same way, as a `synctex_scroll` message,
   under the artifact gate above. It carries a point on a page and nothing more: what that means in
