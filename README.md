@@ -84,7 +84,7 @@ so the browser tracks your theme.
 
 ## Requirements
 
-- Neovim ≥ 0.10 (`vim.uv`, `vim.base64`, `vim.system`, `vim.fs.root`).
+- Neovim ≥ 0.12 (`vim.uv`, `vim.base64`, `vim.system`, `vim.fs.root`).
 - A system browser opener (`xdg-open` / `open` / `start` / `wslview`) or a configured `browser`.
 - Optional: **lvim-utils** (palette theme + merge), **lvim-ui** (the `pick` chooser),
   **lvim-hud** (the serving chip), **lvim-icons** (per-file icons in the chooser). All degrade

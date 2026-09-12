@@ -77,11 +77,12 @@ end
 --- Neovim version + LuaJIT bit (the two hard runtime requirements).
 ---@param h table
 local function check_runtime(h)
-    -- vim.fs.root (0.10), vim.base64 (0.10), vim.system (0.10) — all needed.
-    if vim.fn.has("nvim-0.10") == 1 then
-        h.ok("Neovim >= 0.10 (vim.uv, vim.base64, vim.system, vim.fs.root)")
+    -- vim.fs.root, vim.base64 and vim.system (all 0.10) are what the plugin itself needs; the floor checked is
+    -- the set's, 0.12.
+    if vim.fn.has("nvim-0.12") == 1 then
+        h.ok("Neovim >= 0.12")
     else
-        h.error("Neovim >= 0.10 is required (vim.uv / vim.base64 / vim.system / vim.fs.root)")
+        h.error("Neovim >= 0.12 is required (the lvim-tech set targets 0.12)")
     end
     local ok_bit = pcall(require, "bit")
     if ok_bit then
