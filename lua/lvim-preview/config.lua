@@ -114,7 +114,8 @@
 ---@class LvimPreviewConfig
 ---@field address    string          Bind address. Non-loopback (LAN) is an explicit act — health warns.
 ---@field port       integer         Preferred TCP port.
----@field auto_port  boolean         Scan upward from `port` when it is busy.
+---@field auto_port  boolean         Scan upward from `port` when it is busy; false = only this port
+---                                   (a busy or collided port is a start error).
 ---@field browser    string|string[]|nil  nil = system opener; a command string or an argv list.
 ---@field auto_open  boolean         Open the browser on `:LvimPreview start`.
 ---@field public_url string?         An explicit externally-reachable base URL (scheme://host[:port])
@@ -164,6 +165,7 @@ return {
     -- Only relevant when `address` is non-loopback (you deliberately bind the LAN, e.g. to open the
     -- preview on a phone). A loopback bind is silent — nothing here fires. `warn` surfaces the no-auth
     -- exposure loudly at start (not only in :checkhealth) with the reachable URL(s); `qr` also pops a
+    -- false = only `port`: a busy port, or one served by another lvim-preview, is a start error.
     -- scannable QR of that URL so a phone opens the preview without typing an IP (`:LvimPreview qr`
     -- shows it on demand at any time). Both default on, so exposing the LAN is never silent.
     lan = { warn = true, qr = true },

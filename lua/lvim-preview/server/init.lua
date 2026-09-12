@@ -329,6 +329,13 @@ function M.start(host, port)
     local start_port = port
     if ours_on(host, port) then
         state.collided_port = port
+        if not config.auto_port then
+            -- "only this port" was documented but a collision still bumped to port + 1: honour it.
+            return false,
+                ("port %d is already serving lvim-preview from another Neovim instance (auto_port = false: not trying another port)"):format(
+                    port
+                )
+        end
         notify(
             ("port %d is already serving lvim-preview from ANOTHER Neovim instance. A browser tab on %d "):format(
                 port,

@@ -55,7 +55,7 @@ its default:
   require("lvim-preview").setup({
       address = "127.0.0.1",  -- bind address (non-loopback = LAN, no auth)
       port = 5500,            -- preferred TCP port
-      auto_port = true,       -- scan upward when the port is busy
+      auto_port = true,       -- scan upward when busy (false = only this port)
       browser = nil,          -- nil = system opener; string or argv list
       auto_open = true,       -- open the browser on :LvimPreview start
       public_url = nil,       -- your tunnel/forwarded base URL; advertised in QR/status

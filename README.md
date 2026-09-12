@@ -123,7 +123,7 @@ require("lvim-preview").setup()
 require("lvim-preview").setup({
     address = "127.0.0.1", -- bind address; non-loopback (LAN) is an explicit act — health warns
     port = 5500, -- preferred TCP port
-    auto_port = true, -- scan upward from `port` when it is busy
+    auto_port = true, -- scan upward from `port` when it is busy (false = only this port; a busy port is an error)
     browser = nil, -- nil = system opener; a command string or an argv list ({ "firefox", "--new-window" })
     auto_open = true, -- open the browser on :LvimPreview start
     -- Set to your tunnel / forwarded public base URL (e.g. "https://preview.example.com" or
